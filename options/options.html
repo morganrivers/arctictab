@@ -33,6 +33,25 @@
         </label>
         <p class="hint">How auto-generated group names are shaped. Two-word names (e.g. <i>Sourdough Recipes</i>) are usually more descriptive; one-word names are terser.</p>
       </section>
+      <section>
+        <h2>Naming thresholds</h2>
+        <p class="hint">Advanced. Lower values let names match more loosely; raise them if names feel wrong. Each group logs its chosen tier and similarity scores to the browser console for tuning.</p>
+        <label class="slider">
+          Compose category match: <b id="headSim-val">0.22</b>
+          <input type="range" id="headSim" min="0" max="0.8" step="0.01" value="0.22" />
+        </label>
+        <p class="hint">Minimum similarity between a group and a category noun before composing a two-word name.</p>
+        <label class="slider">
+          Curated name match: <b id="curatedSim-val">0.27</b>
+          <input type="range" id="curatedSim" min="0" max="0.8" step="0.01" value="0.27" />
+        </label>
+        <p class="hint">Minimum similarity to use one of the ~150 curated names before falling back to the noun list.</p>
+        <label class="slider">
+          Keyword coverage: <b id="keywordFrac-val">0.34</b>
+          <input type="range" id="keywordFrac" min="0" max="1" step="0.01" value="0.34" />
+        </label>
+        <p class="hint">A composed keyword must appear in at least this fraction of the group's tabs.</p>
+      </section>
       <p id="status" class="status"></p>
     </main>
     <script type="module" src="options.js"></script>

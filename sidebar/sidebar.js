@@ -36,7 +36,14 @@ function labelFor(group) {
 }
 
 const OPTIONS_KEY = "arctictab:options";
-const OPTIONS_DEFAULTS = { excludePinned: true, rearrange: false, nameStyle: "mixed" };
+const OPTIONS_DEFAULTS = {
+  excludePinned: true,
+  rearrange: false,
+  nameStyle: "mixed",
+  headSim: 0.22,
+  curatedSim: 0.27,
+  keywordFrac: 0.34,
+};
 let options = { ...OPTIONS_DEFAULTS };
 async function loadOptions() {
   const r = await browser.storage.local.get(OPTIONS_KEY);
@@ -137,7 +144,16 @@ async function assignNames(groups, texts, tabs, embeddings) {
   const tabIdxById = new Map(tabs.map((t, i) => [t.id, i]));
   let names;
   try {
-    names = await nameGroups(groups, { tabIdxById, embeddings, texts }, { style: options.nameStyle });
+    names = await nameGroups(
+      groups,
+      { tabIdxById, embeddings, texts },
+      {
+        style: options.nameStyle,
+        headSim: options.headSim,
+        curatedSim: options.curatedSim,
+        keywordFrac: options.keywordFrac,
+      },
+    );
   } catch (e) {
     console.error("[arctictab] naming failed", e);
     names = groups.map(() => "group");

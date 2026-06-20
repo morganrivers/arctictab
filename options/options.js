@@ -1,11 +1,24 @@
 const OPTIONS_KEY = "arctictab:options";
-const DEFAULTS = { excludePinned: true, rearrange: false, nameStyle: "mixed" };
+const DEFAULTS = {
+  excludePinned: true,
+  rearrange: false,
+  nameStyle: "mixed",
+  headSim: 0.22,
+  curatedSim: 0.27,
+  keywordFrac: 0.34,
+};
+const SLIDERS = ["headSim", "curatedSim", "keywordFrac"];
 
 const $ = (s) => document.querySelector(s);
 const excludePinned = $("#excludePinned");
 const rearrange = $("#rearrange");
 const nameStyle = $("#nameStyle");
 const status = $("#status");
+const sliders = Object.fromEntries(SLIDERS.map((k) => [k, $("#" + k)]));
+
+function showSlider(k) {
+  $("#" + k + "-val").textContent = (+sliders[k].value).toFixed(2);
+}
 
 async function load() {
   const r = await browser.storage.local.get(OPTIONS_KEY);
@@ -13,6 +26,7 @@ async function load() {
   excludePinned.checked = !!v.excludePinned;
   rearrange.checked = !!v.rearrange;
   nameStyle.value = v.nameStyle;
+  for (const k of SLIDERS) { sliders[k].value = String(v[k]); showSlider(k); }
 }
 
 async function save() {
@@ -21,6 +35,9 @@ async function save() {
       excludePinned: excludePinned.checked,
       rearrange: rearrange.checked,
       nameStyle: nameStyle.value,
+      headSim: +sliders.headSim.value,
+      curatedSim: +sliders.curatedSim.value,
+      keywordFrac: +sliders.keywordFrac.value,
     },
   });
   status.textContent = "Saved.";
@@ -30,6 +47,10 @@ async function save() {
 excludePinned.addEventListener("change", save);
 rearrange.addEventListener("change", save);
 nameStyle.addEventListener("change", save);
+for (const k of SLIDERS) {
+  sliders[k].addEventListener("input", () => showSlider(k));
+  sliders[k].addEventListener("change", save);
+}
 
 load().catch((e) => {
   console.error(e);

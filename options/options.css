@@ -27,11 +27,16 @@ main {
   padding: 0 16px;
 }
 h1 { font-size: 18px; margin: 0 0 16px; }
+h2 { font-size: 14px; margin: 0 0 4px; }
 section {
   border-top: 1px solid var(--border);
   padding: 12px 0;
 }
 label { display: inline-flex; gap: 8px; align-items: center; cursor: pointer; }
+label.slider { display: flex; gap: 10px; align-items: center; margin-top: 8px; }
+label.slider b { min-width: 2.5em; text-align: right; font-variant-numeric: tabular-nums; }
+label.slider input[type="range"] { flex: 1; accent-color: var(--accent); }
 .hint { margin: 6px 0 0 24px; color: var(--muted); font-size: 12px; }
+section .hint:first-of-type { margin-left: 0; }
 .status { color: var(--muted); font-size: 12px; min-height: 1em; margin-top: 16px; }
 input[type="checkbox"] { accent-color: var(--accent); }
