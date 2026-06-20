@@ -1,0 +1,25 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <link rel="stylesheet" href="sidebar.css" />
+  </head>
+  <body>
+    <header>
+      <div class="row">
+        <button id="group-btn">Group tabs</button>
+        <button id="opts-btn" class="g-btn" title="Options">⚙</button>
+      </div>
+      <div class="row">
+        <label class="opt" for="window-slider">Avg group size: <b id="window-val">8</b></label>
+        <input type="range" id="window-slider" min="0" max="11" step="1" value="3" />
+      </div>
+      <div class="row">
+        <label class="opt" for="penalty-slider">Big-group penalty: <b id="penalty-val">0.0</b></label>
+        <input type="range" id="penalty-slider" min="0" max="10" step="1" value="3" />
+      </div>
+    </header>
+    <main id="groups"></main>
+    <script type="module" src="sidebar.js"></script>
+  </body>
+</html>

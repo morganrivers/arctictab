@@ -1,0 +1,52 @@
+{
+  "manifest_version": 3,
+  "name": "arctictab",
+  "version": "0.1.0",
+  "description": "Group tabs by topic using on-device embeddings.",
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "arctictab@dmrivers.local",
+      "strict_min_version": "134.0"
+    }
+  },
+  "permissions": [
+    "tabs",
+    "tabGroups",
+    "storage",
+    "scripting",
+    "bookmarks"
+  ],
+  "host_permissions": [
+    "<all_urls>"
+  ],
+  "background": {
+    "scripts": ["background.js"],
+    "type": "module"
+  },
+  "sidebar_action": {
+    "default_title": "arctictab",
+    "default_panel": "sidebar/sidebar.html",
+    "default_icon": "icons/icon-48.png"
+  },
+  "action": {
+    "default_title": "Open arctictab",
+    "default_icon": "icons/icon-48.png"
+  },
+  "options_ui": {
+    "page": "options/options.html",
+    "open_in_tab": true
+  },
+  "icons": {
+    "48": "icons/icon-48.png",
+    "96": "icons/icon-96.png"
+  },
+  "web_accessible_resources": [
+    {
+      "resources": ["vendor/transformers/*"],
+      "matches": ["<all_urls>"]
+    }
+  ],
+  "content_security_policy": {
+    "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'"
+  }
+}

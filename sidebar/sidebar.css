@@ -1,0 +1,132 @@
+* { box-sizing: border-box; }
+:root {
+  --bg: #ffffff;
+  --fg: #1b1b1f;
+  --muted: #f1f1f3;
+  --border: #d8d8de;
+  --accent: #3b82f6;
+  --accent-fg: #ffffff;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #1b1b1f;
+    --fg: #e8e8ea;
+    --muted: #2a2a30;
+    --border: #2a2a30;
+    --accent: #3b82f6;
+    --accent-fg: #ffffff;
+  }
+}
+body {
+  font: 13px system-ui, sans-serif;
+  margin: 0;
+  background: var(--bg);
+  color: var(--fg);
+}
+header {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border);
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  background: var(--bg);
+}
+header .row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+header .row input[type="range"] {
+  flex: 1;
+  background: transparent;
+  accent-color: var(--accent);
+}
+#window-val { color: var(--fg); }
+button {
+  background: var(--accent);
+  color: var(--accent-fg);
+  border: 0;
+  padding: 6px 10px;
+  border-radius: 4px;
+  cursor: pointer;
+  font: inherit;
+}
+button:disabled { opacity: 0.5; cursor: wait; }
+.opt { font-size: 12px; opacity: 0.85; }
+#opts-btn { margin-left: auto; font-size: 16px; }
+main { padding: 6px 0; }
+.group {
+  border-top: 1px solid var(--border);
+  padding: 6px 10px;
+}
+.group-header {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.group-header h3 {
+  margin: 4px 0;
+  font-size: 12px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  opacity: 0.75;
+  flex: 1;
+  outline: none;
+  cursor: text;
+}
+.group-header h3:focus {
+  opacity: 1;
+  background: var(--muted);
+  padding: 0 4px;
+  border-radius: 3px;
+}
+.g-btn {
+  background: transparent;
+  border: 0;
+  color: var(--fg);
+  font-size: 14px;
+  opacity: 0.4;
+  padding: 2px 6px;
+  cursor: pointer;
+  border-radius: 3px;
+}
+.g-btn:hover { opacity: 1; background: var(--muted); }
+.tab {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  padding: 4px 4px;
+  border-radius: 3px;
+  cursor: pointer;
+}
+.tab:hover { background: var(--muted); }
+.tab .favicon {
+  width: 14px;
+  height: 14px;
+  flex: 0 0 14px;
+  object-fit: contain;
+  background: transparent;
+}
+.tab .title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1;
+}
+.tab .host { opacity: 0.55; font-size: 11px; }
+.t-btn {
+  background: transparent;
+  border: 0;
+  color: var(--fg);
+  font-size: 14px;
+  opacity: 0;
+  padding: 0 6px;
+  cursor: pointer;
+  border-radius: 3px;
+}
+.tab:hover .t-btn { opacity: 0.5; }
+.t-btn:hover { opacity: 1 !important; background: var(--muted); }

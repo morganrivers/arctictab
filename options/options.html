@@ -1,0 +1,29 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>arctictab options</title>
+    <link rel="stylesheet" href="options.css" />
+  </head>
+  <body>
+    <main>
+      <h1>arctictab</h1>
+      <section>
+        <label>
+          <input type="checkbox" id="excludePinned" />
+          Exclude pinned tabs from grouping
+        </label>
+        <p class="hint">Pinned tabs are kept where they are and never join a group.</p>
+      </section>
+      <section>
+        <label>
+          <input type="checkbox" id="rearrange" />
+          Rearrange tabs on apply
+        </label>
+        <p class="hint">When clicking <b>Apply groups</b>, physically reorder browser tabs so each cluster is contiguous.</p>
+      </section>
+      <p id="status" class="status"></p>
+    </main>
+    <script type="module" src="options.js"></script>
+  </body>
+</html>
