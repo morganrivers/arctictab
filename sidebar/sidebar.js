@@ -1,6 +1,7 @@
 import { buildText, embedBatch, getExtractor, onExtractorProgress } from "../lib/embed.js";
 import { getMany, put } from "../lib/cache.js";
-import { detectExcursionsTargeted, labelGroup, WINDOW_STOPS } from "../lib/cluster.js";
+import { detectExcursionsTargeted, WINDOW_STOPS } from "../lib/cluster.js";
+import { nameGroups } from "../lib/names.js";
 
 const $ = (s) => document.querySelector(s);
 const status = (m) => console.log("[arctictab][status]", m);
@@ -21,19 +22,21 @@ applyBtn.textContent = "Apply groups";
 let state = null;
 let rerunTimer = null;
 const customLabels = new Map();
+// Auto-assigned names from the last naming pass, keyed by groupKey.
+const autoNames = new Map();
 
 function groupKey(group) {
   return group.map((t) => t.id).sort((a, b) => a - b).join(",");
 }
 
-function labelFor(group, texts, tabIdxById) {
+function labelFor(group) {
   const key = groupKey(group);
   if (customLabels.has(key)) return customLabels.get(key);
-  return labelGroup(group.map((t) => texts[tabIdxById.get(t.id)]));
+  return autoNames.get(key) || "group";
 }
 
 const OPTIONS_KEY = "arctictab:options";
-const OPTIONS_DEFAULTS = { excludePinned: true, rearrange: false };
+const OPTIONS_DEFAULTS = { excludePinned: true, rearrange: false, nameStyle: "mixed" };
 let options = { ...OPTIONS_DEFAULTS };
 async function loadOptions() {
   const r = await browser.storage.local.get(OPTIONS_KEY);
@@ -90,7 +93,7 @@ applyBtn.addEventListener("click", async () => {
   applyBtn.disabled = true;
   try {
     status("applying tab groups...");
-    await applyTabGroups(state.lastGroups, state.texts, state.tabs);
+    await applyTabGroups(state.lastGroups);
     status(`applied ${state.lastGroups.length} groups.`);
   } catch (e) {
     console.error(e);
@@ -104,11 +107,11 @@ function scheduleRecluster() {
   if (!state) return;
   clearTimeout(rerunTimer);
   rerunTimer = setTimeout(() => {
-    try { recluster(); } catch (e) { console.error(e); status("error: " + (e?.message || e)); }
+    recluster().catch((e) => { console.error(e); status("error: " + (e?.message || e)); });
   }, 80);
 }
 
-function recluster() {
+async function recluster() {
   console.assert(state != null, "state must exist");
   const { tabs, embeddings, texts } = state;
   const target = WINDOW_STOPS[+slider.value];
@@ -123,10 +126,24 @@ function recluster() {
   log(`recluster result: ${groups.length} groups, avg ${avg.toFixed(1)}, thr ${threshold.toFixed(2)}`);
   const currentKeys = new Set(groups.map(groupKey));
   for (const k of customLabels.keys()) if (!currentKeys.has(k)) customLabels.delete(k);
-  renderGroups(groups, texts, tabs);
+  await assignNames(groups, texts, tabs, embeddings);
+  renderGroups(groups);
   status(
     `${groups.length} groups, avg ${avg.toFixed(1)} (target ${target}, thr ${threshold.toFixed(2)}, ${iterations} iter)`,
   );
+}
+
+async function assignNames(groups, texts, tabs, embeddings) {
+  const tabIdxById = new Map(tabs.map((t, i) => [t.id, i]));
+  let names;
+  try {
+    names = await nameGroups(groups, { tabIdxById, embeddings, texts }, { style: options.nameStyle });
+  } catch (e) {
+    console.error("[arctictab] naming failed", e);
+    names = groups.map(() => "group");
+  }
+  autoNames.clear();
+  groups.forEach((g, i) => autoNames.set(groupKey(g), names[i]));
 }
 
 const log = (...args) => console.log("[arctictab]", ...args);
@@ -211,7 +228,7 @@ async function refresh({ silent = false } = {}) {
 
   state = { tabs, embeddings, texts, lastGroups: null };
   log(`refresh #${id} state set, calling recluster`);
-  recluster();
+  await recluster();
   log(`refresh #${id} done`);
 }
 
@@ -264,8 +281,7 @@ function isGroupable(tab) {
   return !u.startsWith("about:") && !u.startsWith("chrome:") && !u.startsWith("moz-extension:");
 }
 
-async function applyTabGroups(groups, texts, tabs) {
-  const tabIdxById = new Map(tabs.map((t, i) => [t.id, i]));
+async function applyTabGroups(groups) {
   if (options.rearrange) {
     const ordered = [];
     for (const g of groups) for (const t of g) if (isGroupable(t)) ordered.push(t.id);
@@ -276,7 +292,7 @@ async function applyTabGroups(groups, texts, tabs) {
   for (const g of groups) {
     const groupable = g.filter(isGroupable);
     if (groupable.length < 2) continue;
-    const label = labelFor(g, texts, tabIdxById);
+    const label = labelFor(g);
     const ids = groupable.map((t) => t.id);
     try {
       const gid = await browser.tabs.group({ tabIds: ids });
@@ -287,8 +303,7 @@ async function applyTabGroups(groups, texts, tabs) {
   }
 }
 
-function renderGroups(groups, texts, tabs) {
-  const tabIdxById = new Map(tabs.map((t, i) => [t.id, i]));
+function renderGroups(groups) {
   const main = $("#groups");
   main.innerHTML = "";
   for (const g of groups) {
@@ -297,7 +312,7 @@ function renderGroups(groups, texts, tabs) {
 
     const header = document.createElement("div");
     header.className = "group-header";
-    const label = labelFor(g, texts, tabIdxById);
+    const label = labelFor(g);
     const title = document.createElement("h3");
     title.textContent = label;
     title.contentEditable = "true";
@@ -305,11 +320,11 @@ function renderGroups(groups, texts, tabs) {
     title.title = "Click to rename";
     title.addEventListener("keydown", (e) => {
       if (e.key === "Enter") { e.preventDefault(); title.blur(); }
-      if (e.key === "Escape") { title.textContent = labelFor(g, texts, tabIdxById); title.blur(); }
+      if (e.key === "Escape") { title.textContent = labelFor(g); title.blur(); }
     });
     title.addEventListener("blur", () => {
       const newLabel = title.textContent.trim();
-      if (!newLabel) { title.textContent = labelFor(g, texts, tabIdxById); return; }
+      if (!newLabel) { title.textContent = labelFor(g); return; }
       customLabels.set(groupKey(g), newLabel);
     });
     header.appendChild(title);
@@ -411,7 +426,7 @@ async function closeTabs(ids) {
       const newEmbeddings = keep(state.embeddings);
       const newTexts = keep(state.texts);
       state = { tabs: newTabs, embeddings: newEmbeddings, texts: newTexts, lastGroups: null };
-      recluster();
+      await recluster();
     }
   } catch (e) {
     console.error(e);

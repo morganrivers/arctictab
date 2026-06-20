@@ -1,9 +1,10 @@
 const OPTIONS_KEY = "arctictab:options";
-const DEFAULTS = { excludePinned: true, rearrange: false };
+const DEFAULTS = { excludePinned: true, rearrange: false, nameStyle: "mixed" };
 
 const $ = (s) => document.querySelector(s);
 const excludePinned = $("#excludePinned");
 const rearrange = $("#rearrange");
+const nameStyle = $("#nameStyle");
 const status = $("#status");
 
 async function load() {
@@ -11,6 +12,7 @@ async function load() {
   const v = { ...DEFAULTS, ...(r[OPTIONS_KEY] || {}) };
   excludePinned.checked = !!v.excludePinned;
   rearrange.checked = !!v.rearrange;
+  nameStyle.value = v.nameStyle;
 }
 
 async function save() {
@@ -18,6 +20,7 @@ async function save() {
     [OPTIONS_KEY]: {
       excludePinned: excludePinned.checked,
       rearrange: rearrange.checked,
+      nameStyle: nameStyle.value,
     },
   });
   status.textContent = "Saved.";
@@ -26,6 +29,7 @@ async function save() {
 
 excludePinned.addEventListener("change", save);
 rearrange.addEventListener("change", save);
+nameStyle.addEventListener("change", save);
 
 load().catch((e) => {
   console.error(e);
