@@ -24,6 +24,7 @@ let rerunTimer = null;
 const customLabels = new Map();
 // Auto-assigned names from the last naming pass, keyed by groupKey.
 const autoNames = new Map();
+let lastLoggedFingerprint = null;
 
 function groupKey(group) {
   return group.map((t) => t.id).sort((a, b) => a - b).join(",");
@@ -130,6 +131,7 @@ async function recluster() {
     { targetAvgSize: target, sizePenalty },
   );
   state.lastGroups = groups;
+  state.clusterResult = { threshold, avg, iterations };
   log(`recluster result: ${groups.length} groups, avg ${avg.toFixed(1)}, thr ${threshold.toFixed(2)}`);
   const currentKeys = new Set(groups.map(groupKey));
   for (const k of customLabels.keys()) if (!currentKeys.has(k)) customLabels.delete(k);
@@ -163,6 +165,57 @@ async function assignNames(groups, texts, tabs, embeddings) {
 }
 
 const log = (...args) => console.log("[arctictab]", ...args);
+
+function groupCentroid(group, tabIdxById, embeddings) {
+  const dim = embeddings[0].length;
+  const c = new Float32Array(dim);
+  for (const t of group) {
+    const e = embeddings[tabIdxById.get(t.id)];
+    for (let k = 0; k < dim; k++) c[k] += e[k];
+  }
+  let n = 0;
+  for (let k = 0; k < dim; k++) n += c[k] * c[k];
+  n = Math.sqrt(n) || 1;
+  for (let k = 0; k < dim; k++) c[k] /= n;
+  return c;
+}
+
+function logTabSnapshot() {
+  if (!state?.lastGroups?.length) return;
+
+  const fingerprint = state.lastGroups.map(groupKey).sort().join("|");
+  if (fingerprint === lastLoggedFingerprint) return;
+  lastLoggedFingerprint = fingerprint;
+
+  const tabIdxById = new Map(state.tabs.map((t, i) => [t.id, i]));
+
+  const snapshot = {
+    timestamp: new Date().toISOString(),
+    tabCount: state.tabs.length,
+    groupCount: state.lastGroups.length,
+    clusterResult: state.clusterResult ?? null,
+    tabs: state.tabs.map((t, i) => ({
+      id: t.id,
+      index: t.index,
+      url: t.url,
+      title: t.title,
+      text: state.texts[i],
+      embedding: Array.from(state.embeddings[i]),
+    })),
+    groups: state.lastGroups.map((g) => {
+      const key = groupKey(g);
+      return {
+        name: autoNames.get(key) || customLabels.get(key) || "group",
+        tabIds: g.map((t) => t.id),
+        centroid: Array.from(groupCentroid(g, tabIdxById, state.embeddings)),
+      };
+    }),
+  };
+
+  console.log("[arctictab][snapshot]", JSON.stringify(snapshot));
+}
+
+setInterval(logTabSnapshot, 30 * 60 * 1000);
 
 async function queryTabs(retries = 3) {
   const filter = (tabs) => options.excludePinned ? tabs.filter((t) => !t.pinned) : tabs;
