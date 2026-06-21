@@ -193,6 +193,11 @@ function logTabSnapshot() {
     timestamp: new Date().toISOString(),
     tabCount: state.tabs.length,
     groupCount: state.lastGroups.length,
+    settings: {
+      windowTarget: WINDOW_STOPS[+slider.value],
+      sizePenalty: penaltyFromSlider(),
+      ...options,
+    },
     clusterResult: state.clusterResult ?? null,
     tabs: state.tabs.map((t, i) => ({
       id: t.id,
