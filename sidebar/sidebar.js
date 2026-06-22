@@ -1,10 +1,20 @@
 import { buildText, embedBatch, getExtractor, onExtractorProgress } from "../lib/embed.js";
 import { getMany, put } from "../lib/cache.js";
-import { detectExcursionsTargeted, WINDOW_STOPS } from "../lib/cluster.js";
+import { detectExcursions, detectExcursionsTargeted, WINDOW_STOPS } from "../lib/cluster.js";
 import { nameGroups } from "../lib/names.js";
 
 const $ = (s) => document.querySelector(s);
-const status = (m) => console.log("[arctictab][status]", m);
+let statusEl = null;
+let statusHideTimer = null;
+const status = (m) => {
+  console.log("[arctictab][status]", m);
+  statusEl = statusEl || document.getElementById("status-line");
+  if (!statusEl) return;
+  statusEl.textContent = m;
+  statusEl.classList.remove("hidden");
+  clearTimeout(statusHideTimer);
+  statusHideTimer = setTimeout(() => statusEl.classList.add("hidden"), 6000);
+};
 
 const slider = $("#window-slider");
 const windowVal = $("#window-val");
@@ -16,11 +26,23 @@ const PENALTY_MAX = 5.0;
 const penaltyFromSlider = () => (+penaltySlider.value / 10) * PENALTY_MAX;
 const updatePenaltyDisplay = () => (penaltyVal.textContent = penaltyFromSlider().toFixed(2));
 
+const controlChk = $("#control-size-chk");
+const sizeControls = $("#size-controls");
+const FREE_THRESHOLD = 0.5;
+const applyControlVisibility = () => sizeControls.classList.toggle("hidden", !controlChk.checked);
+
 const applyBtn = $("#group-btn");
 applyBtn.textContent = "Apply groups";
+const rearrangeBtn = $("#rearrange-btn");
 
 let state = null;
 let rerunTimer = null;
+let autoApplying = false;
+let suppressMoveRefresh = 0;
+function suppressMovesFor(ms) {
+  suppressMoveRefresh++;
+  setTimeout(() => { suppressMoveRefresh--; }, ms);
+}
 const customLabels = new Map();
 // Auto-assigned names from the last naming pass, keyed by groupKey.
 const autoNames = new Map();
@@ -40,25 +62,42 @@ const OPTIONS_KEY = "arctictab:options";
 const OPTIONS_DEFAULTS = {
   excludePinned: true,
   rearrange: false,
+  hideApplyGroups: false,
+  hideRearrange: false,
+  autoApplyGroups: false,
   nameStyle: "mixed",
   headSim: 0.22,
   curatedSim: 0.27,
   keywordFrac: 0.34,
 };
 let options = { ...OPTIONS_DEFAULTS };
+function applyButtonVisibility() {
+  applyBtn.classList.toggle("hidden", !!options.hideApplyGroups);
+  rearrangeBtn.classList.toggle("hidden", !!options.hideRearrange);
+}
 async function loadOptions() {
   const r = await browser.storage.local.get(OPTIONS_KEY);
   options = { ...OPTIONS_DEFAULTS, ...(r[OPTIONS_KEY] || {}) };
   log("options loaded", options);
+  applyButtonVisibility();
 }
 browser.storage.onChanged.addListener((changes, area) => {
   if (area !== "local" || !changes[OPTIONS_KEY]) return;
   options = { ...OPTIONS_DEFAULTS, ...(changes[OPTIONS_KEY].newValue || {}) };
   log("options updated", options);
+  applyButtonVisibility();
   scheduleRefresh("options-changed");
 });
 
 $("#opts-btn").addEventListener("click", () => browser.runtime.openOptionsPage());
+
+document.addEventListener("mousedown", (e) => {
+  const row = e.target.closest?.(".tab");
+  console.log("[arctictab][probe] document mousedown", e.target?.tagName, e.target?.className, "row?", !!row, row ? `draggable=${row.getAttribute("draggable")}` : "");
+}, true);
+document.addEventListener("dragstart", (e) => {
+  console.log("[arctictab][probe] document dragstart", e.target?.tagName, e.target?.className);
+}, true);
 
 const SETTINGS_KEY = "arctictab:settings";
 async function loadSettings() {
@@ -68,6 +107,7 @@ async function loadSettings() {
     if (v && typeof v === "object") {
       if (typeof v.window === "number") slider.value = String(v.window);
       if (typeof v.penalty === "number") penaltySlider.value = String(v.penalty);
+      if (typeof v.controlSize === "boolean") controlChk.checked = v.controlSize;
     }
   } catch (e) {
     console.warn("[arctictab] loadSettings failed", e);
@@ -75,15 +115,21 @@ async function loadSettings() {
 }
 function saveSettings() {
   browser.storage.local.set({
-    [SETTINGS_KEY]: { window: +slider.value, penalty: +penaltySlider.value },
+    [SETTINGS_KEY]: {
+      window: +slider.value,
+      penalty: +penaltySlider.value,
+      controlSize: controlChk.checked,
+    },
   }).catch((e) => console.warn("[arctictab] saveSettings failed", e));
 }
 
 slider.addEventListener("input", () => { updateWindowDisplay(); saveSettings(); scheduleRecluster(); });
 penaltySlider.addEventListener("input", () => { updatePenaltyDisplay(); saveSettings(); scheduleRecluster(); });
-loadSettings().then(() => { updateWindowDisplay(); updatePenaltyDisplay(); });
+controlChk.addEventListener("change", () => { applyControlVisibility(); saveSettings(); scheduleRecluster(); });
+loadSettings().then(() => { updateWindowDisplay(); updatePenaltyDisplay(); applyControlVisibility(); });
 updateWindowDisplay();
 updatePenaltyDisplay();
+applyControlVisibility();
 
 onExtractorProgress((p) => {
   if (!p || !p.status) return;
@@ -111,6 +157,38 @@ applyBtn.addEventListener("click", async () => {
   }
 });
 
+rearrangeBtn.addEventListener("click", async () => {
+  if (!state?.lastGroups) return;
+  rearrangeBtn.disabled = true;
+  try {
+    status("rearranging tabs...");
+    await rearrangeTabs(state.lastGroups);
+    status(`rearranged ${state.lastGroups.length} groups.`);
+    scheduleRefresh("rearrange-done");
+  } catch (e) {
+    console.error(e);
+    status("rearrange error: " + (e?.message || e));
+  } finally {
+    rearrangeBtn.disabled = false;
+  }
+});
+
+const logsBtn = $("#logs-btn");
+logsBtn.addEventListener("click", async () => {
+  logsBtn.disabled = true;
+  try {
+    status("downloading logs + snapshot...");
+    await flushLogsNow();
+    await logTabSnapshot({ force: true });
+    status("logs downloaded.");
+  } catch (e) {
+    console.error(e);
+    status("log download error: " + (e?.message || e));
+  } finally {
+    logsBtn.disabled = false;
+  }
+});
+
 function scheduleRecluster() {
   if (!state) return;
   clearTimeout(rerunTimer);
@@ -122,14 +200,24 @@ function scheduleRecluster() {
 async function recluster() {
   console.assert(state != null, "state must exist");
   const { tabs, embeddings, texts } = state;
-  const target = WINDOW_STOPS[+slider.value];
-  const sizePenalty = penaltyFromSlider();
-  log(`recluster: ${tabs.length} tabs, target=${target}, penalty=${sizePenalty.toFixed(2)}`);
-  const { groups, threshold, avg, iterations } = detectExcursionsTargeted(
-    tabs,
-    embeddings,
-    { targetAvgSize: target, sizePenalty },
-  );
+  let groups, threshold, avg, iterations, statusMsg;
+  if (controlChk.checked) {
+    const target = WINDOW_STOPS[+slider.value];
+    const sizePenalty = penaltyFromSlider();
+    log(`recluster: ${tabs.length} tabs, target=${target}, penalty=${sizePenalty.toFixed(2)}`);
+    ({ groups, threshold, avg, iterations } = detectExcursionsTargeted(
+      tabs,
+      embeddings,
+      { targetAvgSize: target, sizePenalty },
+    ));
+    statusMsg = `${groups.length} groups, avg ${avg.toFixed(1)} (target ${target}, thr ${threshold.toFixed(2)}, ${iterations} iter)`;
+  } else {
+    log(`recluster (auto): ${tabs.length} tabs, thr=${FREE_THRESHOLD}`);
+    groups = detectExcursions(tabs, embeddings, { cosineDropThreshold: FREE_THRESHOLD });
+    threshold = FREE_THRESHOLD;
+    avg = tabs.length / Math.max(1, groups.length);
+    statusMsg = `${groups.length} groups, avg ${avg.toFixed(1)} (auto, thr ${threshold.toFixed(2)})`;
+  }
   state.lastGroups = groups;
   state.clusterResult = { threshold, avg, iterations };
   log(`recluster result: ${groups.length} groups, avg ${avg.toFixed(1)}, thr ${threshold.toFixed(2)}`);
@@ -137,9 +225,14 @@ async function recluster() {
   for (const k of customLabels.keys()) if (!currentKeys.has(k)) customLabels.delete(k);
   await assignNames(groups, texts, tabs, embeddings);
   renderGroups(groups);
-  status(
-    `${groups.length} groups, avg ${avg.toFixed(1)} (target ${target}, thr ${threshold.toFixed(2)}, ${iterations} iter)`,
-  );
+  status(statusMsg);
+  logTabSnapshot();
+  if (options.autoApplyGroups && !autoApplying) {
+    autoApplying = true;
+    try { await applyTabGroups(groups); }
+    catch (e) { console.warn("[arctictab] auto-apply failed", e); }
+    finally { autoApplying = false; }
+  }
 }
 
 async function assignNames(groups, texts, tabs, embeddings) {
@@ -164,7 +257,44 @@ async function assignNames(groups, texts, tabs, embeddings) {
   groups.forEach((g, i) => autoNames.set(groupKey(g), names[i]));
 }
 
-const log = (...args) => console.log("[arctictab]", ...args);
+const LOG_DIR_PREFIX = "arctictab";
+const SESSION_START_ISO = new Date().toISOString().replace(/[:.]/g, "-");
+const SESSION_LOG_NAME = `${LOG_DIR_PREFIX}/session-${SESSION_START_ISO}.log`;
+const LOG_FLUSH_MS = 30 * 1000;
+const logBuffer = [];
+let logFlushTimer = null;
+
+async function downloadBlob(filename, blob, conflictAction) {
+  const url = URL.createObjectURL(blob);
+  try {
+    await browser.downloads.download({ url, filename, conflictAction, saveAs: false });
+  } finally {
+    setTimeout(() => URL.revokeObjectURL(url), 60_000);
+  }
+}
+
+async function flushLogsNow() {
+  if (logFlushTimer != null) { clearTimeout(logFlushTimer); logFlushTimer = null; }
+  if (!logBuffer.length) return;
+  const text = logBuffer.join("");
+  await downloadBlob(SESSION_LOG_NAME, new Blob([text], { type: "text/plain" }), "overwrite");
+}
+
+function scheduleLogFlush() {
+  if (logFlushTimer != null) return;
+  logFlushTimer = setTimeout(async () => {
+    logFlushTimer = null;
+    try { await flushLogsNow(); }
+    catch (e) { console.warn("[arctictab] session log flush failed", e); }
+  }, LOG_FLUSH_MS);
+}
+
+const log = (...args) => {
+  console.log("[arctictab]", ...args);
+  const parts = args.map((a) => (typeof a === "string" ? a : JSON.stringify(a)));
+  logBuffer.push(`${new Date().toISOString()} [arctictab] ${parts.join(" ")}\n`);
+  scheduleLogFlush();
+};
 
 function groupCentroid(group, tabIdxById, embeddings) {
   const dim = embeddings[0].length;
@@ -180,11 +310,11 @@ function groupCentroid(group, tabIdxById, embeddings) {
   return c;
 }
 
-function logTabSnapshot() {
+async function logTabSnapshot({ force = false } = {}) {
   if (!state?.lastGroups?.length) return;
 
   const fingerprint = state.lastGroups.map(groupKey).sort().join("|");
-  if (fingerprint === lastLoggedFingerprint) return;
+  if (!force && fingerprint === lastLoggedFingerprint) return;
   lastLoggedFingerprint = fingerprint;
 
   const tabIdxById = new Map(state.tabs.map((t, i) => [t.id, i]));
@@ -217,7 +347,15 @@ function logTabSnapshot() {
     }),
   };
 
-  console.log("[arctictab][snapshot]", JSON.stringify(snapshot));
+  const json = JSON.stringify(snapshot);
+  console.log("[arctictab][snapshot]", json);
+  const fname = `${LOG_DIR_PREFIX}/snapshot-${new Date().toISOString().replace(/[:.]/g, "-")}.json`;
+  try {
+    await downloadBlob(fname, new Blob([json], { type: "application/json" }), "uniquify");
+    log(`snapshot saved to ${fname}`);
+  } catch (e) {
+    console.warn("[arctictab] snapshot save failed", e);
+  }
 }
 
 setInterval(logTabSnapshot, 30 * 60 * 1000);
@@ -332,6 +470,11 @@ function scheduleRefresh(source) {
 log("registering tabs.* listeners");
 browser.tabs.onCreated.addListener((t) => { log("tabs.onCreated", t.id, t.url); scheduleRefresh("onCreated"); });
 browser.tabs.onRemoved.addListener((id) => { log("tabs.onRemoved", id); scheduleRefresh("onRemoved"); });
+browser.tabs.onMoved.addListener((id, info) => {
+  log("tabs.onMoved", id, info);
+  if (suppressMoveRefresh > 0) { log("tabs.onMoved suppressed (self-move)"); return; }
+  scheduleRefresh("onMoved");
+});
 browser.tabs.onUpdated.addListener((tabId, changeInfo) => {
   log("tabs.onUpdated raw", tabId, changeInfo);
   if (changeInfo.url || changeInfo.title || changeInfo.status === "complete") {
@@ -355,14 +498,76 @@ function isGroupable(tab) {
   return !u.startsWith("about:") && !u.startsWith("chrome:") && !u.startsWith("moz-extension:");
 }
 
-async function applyTabGroups(groups) {
-  if (options.rearrange) {
-    const ordered = [];
-    for (const g of groups) for (const t of g) if (isGroupable(t)) ordered.push(t.id);
-    log(`rearrange: moving ${ordered.length} tabs to cluster order`);
-    try { await browser.tabs.move(ordered, { index: -1 }); }
-    catch (e) { console.warn("rearrange failed", e); }
+async function reorderTabByDrop(sourceId, targetId, before) {
+  try {
+    const [src, tgt] = await Promise.all([
+      browser.tabs.get(sourceId),
+      browser.tabs.get(targetId),
+    ]);
+    let newIndex = before ? tgt.index : tgt.index + 1;
+    if (src.index < tgt.index) newIndex--;
+    log(`drag: tab ${sourceId} (idx ${src.index}) -> ${targetId} (idx ${tgt.index}, before=${before}) => index ${newIndex}`);
+    suppressMoveRefresh++;
+    try { await browser.tabs.move(sourceId, { index: newIndex }); }
+    finally { setTimeout(() => { suppressMoveRefresh--; }, 250); }
+    status(`moved tab to index ${newIndex}`);
+    scheduleRefresh("drag-drop");
+  } catch (e) {
+    console.error("reorderTabByDrop failed", e);
+    log(`drag error: ${e?.message || e}`);
+    status("drag error: " + (e?.message || e));
   }
+}
+
+async function ungroupAll(tabIds) {
+  if (!browser.tabs.ungroup) { log("ungroupAll: tabs.ungroup unsupported"); return; }
+  try {
+    await browser.tabs.ungroup(tabIds);
+    log(`ungroupAll: ${tabIds.length} tabs removed from any existing group`);
+  } catch (e) {
+    log(`ungroupAll failed: ${e?.message || e}`);
+  }
+}
+
+async function snapshotTabOrder(label, ids) {
+  try {
+    const tabs = await browser.tabs.query({ currentWindow: true });
+    const byId = new Map(tabs.map((t) => [t.id, t.index]));
+    const idxs = ids.map((id) => byId.get(id));
+    log(`tab-order [${label}]: ${ids.length} ids → indices [${idxs.join(",")}]`);
+  } catch (e) { log(`tab-order [${label}] failed: ${e?.message || e}`); }
+}
+
+async function rearrangeTabs(groups) {
+  const ordered = [];
+  for (const g of groups) for (const t of g) if (isGroupable(t)) ordered.push(t.id);
+  log(`rearrange: ${ordered.length} tabs target cluster order`);
+
+  const currentTabs = await browser.tabs.query({ currentWindow: true });
+  const orderedSet = new Set(ordered);
+  const liveOrder = currentTabs
+    .filter((t) => orderedSet.has(t.id))
+    .sort((a, b) => a.index - b.index)
+    .map((t) => t.id);
+  const alreadyOrdered = liveOrder.length === ordered.length
+    && liveOrder.every((id, i) => id === ordered[i]);
+  if (alreadyOrdered) {
+    log("rearrange: tabs already in cluster order, skipping moves");
+    return;
+  }
+
+  suppressMoveRefresh++;
+  try {
+    await ungroupAll(ordered);
+    await browser.tabs.move(ordered, { index: -1 });
+    log("rearrange: move completed");
+  } catch (e) { console.warn("rearrange failed", e); log(`rearrange error: ${e?.message || e}`); }
+  finally { setTimeout(() => { suppressMoveRefresh--; }, 250); }
+}
+
+async function applyTabGroups(groups) {
+  suppressMovesFor(500);
+  if (options.rearrange) await rearrangeTabs(groups);
   for (const g of groups) {
     const groupable = g.filter(isGroupable);
     if (groupable.length < 2) continue;
@@ -380,7 +585,10 @@ async function applyTabGroups(groups) {
 function renderGroups(groups) {
   const main = $("#groups");
   main.innerHTML = "";
-  for (const g of groups) {
+  const ordered = groups
+    .map((g) => [...g].sort((a, b) => a.index - b.index))
+    .sort((a, b) => a[0].index - b[0].index);
+  for (const g of ordered) {
     const div = document.createElement("div");
     div.className = "group";
 
@@ -428,6 +636,42 @@ function renderGroups(groups) {
     for (const t of g) {
       const row = document.createElement("div");
       row.className = "tab";
+      row.setAttribute("draggable", "true");
+      row.draggable = true;
+      row.dataset.tabId = String(t.id);
+      row.title = `${t.title || ""}\n${t.url || ""}`.trim();
+      row.addEventListener("mousedown", () => log(`mousedown on tab row ${t.id}`));
+      row.addEventListener("dragstart", (e) => {
+        log(`dragstart tab ${t.id}`);
+        e.dataTransfer.setData("text/plain", String(t.id));
+        e.dataTransfer.effectAllowed = "move";
+        row.classList.add("dragging");
+      });
+      row.addEventListener("dragend", () => {
+        row.classList.remove("dragging");
+        document.querySelectorAll(".tab.drop-before, .tab.drop-after")
+          .forEach((el) => el.classList.remove("drop-before", "drop-after"));
+      });
+      row.addEventListener("dragover", (e) => {
+        e.preventDefault();
+        e.dataTransfer.dropEffect = "move";
+        const r = row.getBoundingClientRect();
+        const before = (e.clientY - r.top) < r.height / 2;
+        row.classList.toggle("drop-before", before);
+        row.classList.toggle("drop-after", !before);
+      });
+      row.addEventListener("dragleave", () => {
+        row.classList.remove("drop-before", "drop-after");
+      });
+      row.addEventListener("drop", async (e) => {
+        e.preventDefault();
+        const r = row.getBoundingClientRect();
+        const before = (e.clientY - r.top) < r.height / 2;
+        row.classList.remove("drop-before", "drop-after");
+        const sourceId = +e.dataTransfer.getData("text/plain");
+        if (!sourceId || sourceId === t.id) return;
+        await reorderTabByDrop(sourceId, t.id, before);
+      });
       const fav = document.createElement("img");
       fav.className = "favicon";
       fav.alt = "";
@@ -475,17 +719,32 @@ function fallbackFaviconUrl(tab) {
   return TRANSPARENT_PX;
 }
 
+async function findBookmarksToolbarId() {
+  const tree = await browser.bookmarks.getTree();
+  const root = tree[0];
+  console.assert(root && Array.isArray(root.children), "bookmarks tree root must have children");
+  const toolbar = root.children.find((n) => n.id === "toolbar_____" || /toolbar/i.test(n.title || ""));
+  if (toolbar) return toolbar.id;
+  const menu = root.children.find((n) => n.id === "menu________" || /menu/i.test(n.title || ""));
+  return (menu || root.children[0]).id;
+}
+
 async function bookmarkGroup(label, groupTabs) {
   const bookmarkable = groupTabs.filter((t) => t.url && !t.url.startsWith("about:") && !t.url.startsWith("chrome:"));
+  log(`bookmarkGroup "${label}": ${groupTabs.length} tabs, ${bookmarkable.length} bookmarkable`);
   if (!bookmarkable.length) { status("nothing to bookmark."); return; }
   try {
-    const folder = await browser.bookmarks.create({ title: `arctictab: ${label}` });
+    const parentId = await findBookmarksToolbarId();
+    log(`bookmarkGroup: creating folder in parent ${parentId}`);
+    const folder = await browser.bookmarks.create({ parentId, title: `arctictab: ${label}` });
     for (const t of bookmarkable) {
       await browser.bookmarks.create({ parentId: folder.id, title: t.title || t.url, url: t.url });
     }
-    status(`bookmarked ${bookmarkable.length} → "${label}"`);
+    log(`bookmarkGroup: ${bookmarkable.length} bookmarks created in folder ${folder.id}`);
+    status(`bookmarked ${bookmarkable.length} → "${label}" (Bookmarks Toolbar)`);
   } catch (e) {
     console.error(e);
+    log(`bookmarkGroup error: ${e?.message || e}`);
     status("bookmark error: " + (e?.message || e));
   }
 }

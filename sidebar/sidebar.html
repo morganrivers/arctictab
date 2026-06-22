@@ -8,15 +8,23 @@
     <header>
       <div class="row">
         <button id="group-btn">Group tabs</button>
+        <button id="rearrange-btn">Rearrange tabs</button>
+        <button id="logs-btn" class="g-btn" title="Download session log">⬇</button>
         <button id="opts-btn" class="g-btn" title="Options">⚙</button>
       </div>
       <div class="row">
-        <label class="opt" for="window-slider">Avg group size: <b id="window-val">8</b></label>
-        <input type="range" id="window-slider" min="0" max="11" step="1" value="3" />
+        <label class="opt"><input type="checkbox" id="control-size-chk" /> Control group size</label>
       </div>
-      <div class="row">
-        <label class="opt" for="penalty-slider">Big-group penalty: <b id="penalty-val">0.0</b></label>
-        <input type="range" id="penalty-slider" min="0" max="10" step="1" value="3" />
+      <div id="status-line" class="status-line hidden" role="status" aria-live="polite"></div>
+      <div id="size-controls" class="hidden">
+        <div class="row">
+          <label class="opt" for="window-slider">Avg group size: <b id="window-val">8</b></label>
+          <input type="range" id="window-slider" min="0" max="11" step="1" value="3" />
+        </div>
+        <div class="row">
+          <label class="opt" for="penalty-slider">Big-group penalty: <b id="penalty-val">0.0</b></label>
+          <input type="range" id="penalty-slider" min="0" max="10" step="1" value="3" />
+        </div>
       </div>
     </header>
     <main id="groups"></main>

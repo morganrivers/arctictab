@@ -1,4 +1,16 @@
 * { box-sizing: border-box; }
+.hidden { display: none; }
+#size-controls { display: flex; flex-direction: column; gap: 6px; }
+#size-controls.hidden { display: none; }
+.status-line {
+  padding: 4px 8px;
+  border-radius: 3px;
+  background: var(--muted);
+  font-size: 12px;
+  line-height: 1.3;
+  white-space: pre-wrap;
+}
+.status-line.hidden { display: none; }
 :root {
   --bg: #ffffff;
   --fg: #1b1b1f;
@@ -101,9 +113,16 @@ main { padding: 6px 0; }
   align-items: center;
   padding: 4px 4px;
   border-radius: 3px;
-  cursor: pointer;
+  cursor: grab;
+  user-select: none;
+  -moz-user-select: none;
 }
+.tab:active { cursor: grabbing; }
+.tab.dragging { cursor: grabbing; }
 .tab:hover { background: var(--muted); }
+.tab.dragging { opacity: 0.4; }
+.tab.drop-before { box-shadow: inset 0 2px 0 0 var(--accent); }
+.tab.drop-after { box-shadow: inset 0 -2px 0 0 var(--accent); }
 .tab .favicon {
   width: 14px;
   height: 14px;

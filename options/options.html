@@ -2,7 +2,9 @@
 <html>
   <head>
     <meta charset="utf-8" />
-    <title>arctictab options</title>
+    <title>arctictab settings</title>
+    <link rel="icon" type="image/png" sizes="48x48" href="../icons/icon-48.png" />
+    <link rel="icon" type="image/png" sizes="96x96" href="../icons/icon-96.png" />
     <link rel="stylesheet" href="options.css" />
   </head>
   <body>
@@ -21,6 +23,25 @@
           Rearrange tabs on apply
         </label>
         <p class="hint">When clicking <b>Apply groups</b>, physically reorder browser tabs so each cluster is contiguous.</p>
+      </section>
+      <section>
+        <label>
+          <input type="checkbox" id="autoApplyGroups" />
+          Auto-apply groups to tabs
+        </label>
+        <p class="hint">Re-apply groups (and rearrange, if enabled above) automatically every time the cluster recomputes.</p>
+      </section>
+      <section>
+        <label>
+          <input type="checkbox" id="hideApplyGroups" />
+          Hide "Apply groups" button
+        </label>
+      </section>
+      <section>
+        <label>
+          <input type="checkbox" id="hideRearrange" />
+          Hide "Rearrange tabs" button
+        </label>
       </section>
       <section>
         <label>

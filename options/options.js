@@ -2,6 +2,9 @@ const OPTIONS_KEY = "arctictab:options";
 const DEFAULTS = {
   excludePinned: true,
   rearrange: false,
+  hideApplyGroups: false,
+  hideRearrange: false,
+  autoApplyGroups: false,
   nameStyle: "mixed",
   headSim: 0.22,
   curatedSim: 0.27,
@@ -12,6 +15,9 @@ const SLIDERS = ["headSim", "curatedSim", "keywordFrac"];
 const $ = (s) => document.querySelector(s);
 const excludePinned = $("#excludePinned");
 const rearrange = $("#rearrange");
+const hideApplyGroups = $("#hideApplyGroups");
+const hideRearrange = $("#hideRearrange");
+const autoApplyGroups = $("#autoApplyGroups");
 const nameStyle = $("#nameStyle");
 const status = $("#status");
 const sliders = Object.fromEntries(SLIDERS.map((k) => [k, $("#" + k)]));
@@ -25,6 +31,9 @@ async function load() {
   const v = { ...DEFAULTS, ...(r[OPTIONS_KEY] || {}) };
   excludePinned.checked = !!v.excludePinned;
   rearrange.checked = !!v.rearrange;
+  hideApplyGroups.checked = !!v.hideApplyGroups;
+  hideRearrange.checked = !!v.hideRearrange;
+  autoApplyGroups.checked = !!v.autoApplyGroups;
   nameStyle.value = v.nameStyle;
   for (const k of SLIDERS) { sliders[k].value = String(v[k]); showSlider(k); }
 }
@@ -34,6 +43,9 @@ async function save() {
     [OPTIONS_KEY]: {
       excludePinned: excludePinned.checked,
       rearrange: rearrange.checked,
+      hideApplyGroups: hideApplyGroups.checked,
+      hideRearrange: hideRearrange.checked,
+      autoApplyGroups: autoApplyGroups.checked,
       nameStyle: nameStyle.value,
       headSim: +sliders.headSim.value,
       curatedSim: +sliders.curatedSim.value,
@@ -46,6 +58,9 @@ async function save() {
 
 excludePinned.addEventListener("change", save);
 rearrange.addEventListener("change", save);
+hideApplyGroups.addEventListener("change", save);
+hideRearrange.addEventListener("change", save);
+autoApplyGroups.addEventListener("change", save);
 nameStyle.addEventListener("change", save);
 for (const k of SLIDERS) {
   sliders[k].addEventListener("input", () => showSlider(k));

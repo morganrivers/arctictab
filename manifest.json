@@ -14,7 +14,8 @@
     "tabGroups",
     "storage",
     "scripting",
-    "bookmarks"
+    "bookmarks",
+    "downloads"
   ],
   "host_permissions": [
     "<all_urls>"

@@ -1,3 +1,5 @@
 *.md
 .amo-upload-uuid
 web-ext-artifacts/
+logdata/
+viewer.py
