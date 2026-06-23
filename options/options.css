@@ -40,3 +40,15 @@ label.slider input[type="range"] { flex: 1; accent-color: var(--accent); }
 section .hint:first-of-type { margin-left: 0; }
 .status { color: var(--muted); font-size: 12px; min-height: 1em; margin-top: 16px; }
 input[type="checkbox"] { accent-color: var(--accent); }
+.inline-hint { color: var(--muted); font-size: 12px; font-style: italic; display: none; }
+.inline-hint.show { display: inline; }
+label.disabled { opacity: 0.55; cursor: not-allowed; }
+label.disabled input { cursor: not-allowed; }
+label.anchor-row { display: flex; gap: 6px; align-items: center; margin-top: 6px; }
+label.anchor-row input[type="number"] { width: 5em; padding: 2px 4px; font: inherit; }
+details summary { cursor: pointer; user-select: none; }
+ol.steps { margin: 8px 0 0 24px; padding-left: 16px; }
+ol.steps li { margin: 4px 0; }
+code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; background: rgba(127,127,127,0.12); padding: 1px 4px; border-radius: 3px; }
+pre { background: rgba(127,127,127,0.12); padding: 8px 10px; border-radius: 4px; overflow-x: auto; margin: 6px 0; }
+pre code { background: none; padding: 0; }

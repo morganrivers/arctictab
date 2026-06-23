@@ -74,6 +74,13 @@ main { padding: 6px 0; }
   border-top: 1px solid var(--border);
   padding: 6px 10px;
 }
+.group.ungrouped { border-top: 0; }
+.ungrouped-separator {
+  height: 6px;
+  margin: 10px 6px 6px;
+  border-top: 2px solid var(--border);
+  border-bottom: 2px solid var(--border);
+}
 .group-header {
   display: flex;
   align-items: center;
@@ -123,6 +130,11 @@ main { padding: 6px 0; }
 .tab.dragging { opacity: 0.4; }
 .tab.drop-before { box-shadow: inset 0 2px 0 0 var(--accent); }
 .tab.drop-after { box-shadow: inset 0 -2px 0 0 var(--accent); }
+.tab.active {
+  background: var(--bg);
+  box-shadow: 0 0 0 1px var(--border), 0 1px 3px rgba(0, 0, 0, 0.12);
+}
+.tab.active:hover { background: var(--bg); }
 .tab .favicon {
   width: 14px;
   height: 14px;

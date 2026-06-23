@@ -19,29 +19,61 @@
       </section>
       <section>
         <label>
-          <input type="checkbox" id="rearrange" />
-          Rearrange tabs on apply
+          <input type="checkbox" id="groupBySimilarity" />
+          New tabs put at end of most similar group
         </label>
-        <p class="hint">When clicking <b>Apply groups</b>, physically reorder browser tabs so each cluster is contiguous.</p>
+        <p class="hint">Clusters by content across the whole tab strip, ignoring current position. Identical or near-identical pages cluster together, and non-groupable tabs (about:newtab, about:debugging, etc.) sit at the end of whichever cluster they best match. When off, the original position-preserving algorithm is used.</p>
+      </section>
+      <section>
+        <label>
+          <input type="checkbox" id="reorganizeGroups" />
+          Reorder groups so similar groups sit next to each other
+        </label>
+        <p class="hint">When "Re-organize tabs" runs, also reorder the groups themselves by content similarity (greedy nearest-neighbor on group centroids), so related groups end up adjacent in the tab strip. When off, groups stay in their current left-to-right order.</p>
       </section>
       <section>
         <label>
           <input type="checkbox" id="autoApplyGroups" />
-          Auto-apply groups to tabs
+          Auto-organize tabs
         </label>
-        <p class="hint">Re-apply groups (and rearrange, if enabled above) automatically every time the cluster recomputes.</p>
+        <p class="hint">Re-apply groups (rearranging the tab strip and creating Firefox tab groups) automatically every time the cluster recomputes.</p>
       </section>
-      <section>
+      <section id="autoApplyNamingSection">
+        <label>
+          <input type="checkbox" id="autoApplyNaming" />
+          Auto-apply groups and group names
+          <span id="autoApplyNamingDisabledHint" class="inline-hint">(uncheck "Auto-organize tabs" to use this setting)</span>
+        </label>
+        <p class="hint">When unchecked, group names don't auto-update and newly opened tabs appear below a separator until you click "Apply groups".</p>
+      </section>
+      <section id="hideApplyGroupsSection">
         <label>
           <input type="checkbox" id="hideApplyGroups" />
           Hide "Apply groups" button
+          <span id="hideApplyGroupsDisabledHint" class="inline-hint"></span>
         </label>
       </section>
       <section>
         <label>
           <input type="checkbox" id="hideRearrange" />
-          Hide "Rearrange tabs" button
+          Hide "Re-organize tabs" button
         </label>
+      </section>
+      <section>
+        <details>
+          <summary>Hide Firefox's native tab strip</summary>
+          <p class="hint">Firefox extensions can't hide the top tab strip directly. To rely only on the arctictab sidebar, edit your Firefox profile's <code>userChrome.css</code>:</p>
+          <ol class="hint steps">
+            <li>Open <code>about:config</code> and set <code>toolkit.legacyUserProfileCustomizations.stylesheets</code> to <b>true</b>.</li>
+            <li>Open <code>about:profiles</code> and click <b>Open Folder</b> next to your current profile's Root Directory.</li>
+            <li>Inside that folder, create a subfolder named <code>chrome</code> if it doesn't exist.</li>
+            <li>Inside <code>chrome/</code>, create or edit <code>userChrome.css</code> and add:
+              <pre><code>#TabsToolbar { visibility: collapse !important; }</code></pre>
+            </li>
+            <li>Restart Firefox.</li>
+          </ol>
+          <p class="hint">To restore the tab strip, remove that rule (or set the <code>about:config</code> pref back to <b>false</b>) and restart.</p>
+        </details>
       </section>
       <section>
         <label>
@@ -53,6 +85,22 @@
           </select>
         </label>
         <p class="hint">How auto-generated group names are shaped. Two-word names (e.g. <i>Sourdough Recipes</i>) are usually more descriptive; one-word names are terser.</p>
+      </section>
+      <section>
+        <h2>Auto group count</h2>
+        <p class="hint">When "Control group size" is off in the sidebar, the preferred number of groups is derived from the tab count by interpolating between these anchor points. Beyond the last anchor, the rate of the last segment is extrapolated.</p>
+        <label class="anchor-row">
+          <input type="number" id="anchorTabs1" min="1" /> tabs →
+          <input type="number" id="anchorGroups1" min="1" /> groups
+        </label>
+        <label class="anchor-row">
+          <input type="number" id="anchorTabs2" min="1" /> tabs →
+          <input type="number" id="anchorGroups2" min="1" /> groups
+        </label>
+        <label class="anchor-row">
+          <input type="number" id="anchorTabs3" min="1" /> tabs →
+          <input type="number" id="anchorGroups3" min="1" /> groups
+        </label>
       </section>
       <section>
         <h2>Naming thresholds</h2>

@@ -1,6 +1,6 @@
 import { buildText, embedBatch, getExtractor, onExtractorProgress } from "../lib/embed.js";
 import { getMany, put } from "../lib/cache.js";
-import { detectExcursions, detectExcursionsTargeted, WINDOW_STOPS } from "../lib/cluster.js";
+import { detectExcursions, detectExcursionsTargeted, clusterByEmbeddings, clusterByEmbeddingsTargeted, orderGroupsBySimilarity } from "../lib/cluster.js";
 import { nameGroups } from "../lib/names.js";
 
 const $ = (s) => document.querySelector(s);
@@ -18,13 +18,33 @@ const status = (m) => {
 
 const slider = $("#window-slider");
 const windowVal = $("#window-val");
-const updateWindowDisplay = () => (windowVal.textContent = String(WINDOW_STOPS[+slider.value]));
+const WINDOW_MIN = 1;
+const WINDOW_MAX = 60;
+const windowFromSlider = () => Math.max(WINDOW_MIN, Math.min(WINDOW_MAX, Math.round(+slider.value)));
+const updateWindowDisplay = () => (windowVal.textContent = String(windowFromSlider()));
+
+const PENALTY_STOPS = [0, 0.4, 0.8, 1.2, 2.4, 3.6, 4.8, 6, 12, 24, 48];
+function penaltyFromSliderValue(raw) {
+  const r = Math.max(0, Math.min(PENALTY_STOPS.length - 1, +raw));
+  const lo = Math.floor(r);
+  const hi = Math.min(PENALTY_STOPS.length - 1, lo + 1);
+  const t = r - lo;
+  const v = PENALTY_STOPS[lo] * (1 - t) + PENALTY_STOPS[hi] * t;
+  return Math.round(v * 100) / 100;
+}
+function formatPenalty(v) {
+  return v >= 10 ? v.toFixed(1) : v.toFixed(2);
+}
 
 const penaltySlider = $("#penalty-slider");
 const penaltyVal = $("#penalty-val");
-const PENALTY_MAX = 5.0;
-const penaltyFromSlider = () => (+penaltySlider.value / 10) * PENALTY_MAX;
-const updatePenaltyDisplay = () => (penaltyVal.textContent = penaltyFromSlider().toFixed(2));
+const penaltyFromSlider = () => penaltyFromSliderValue(penaltySlider.value);
+const updatePenaltyDisplay = () => (penaltyVal.textContent = formatPenalty(penaltyFromSlider()));
+
+const smallPenaltySlider = $("#small-penalty-slider");
+const smallPenaltyVal = $("#small-penalty-val");
+const smallPenaltyFromSlider = () => penaltyFromSliderValue(smallPenaltySlider.value);
+const updateSmallPenaltyDisplay = () => (smallPenaltyVal.textContent = formatPenalty(smallPenaltyFromSlider()));
 
 const controlChk = $("#control-size-chk");
 const sizeControls = $("#size-controls");
@@ -59,20 +79,56 @@ function labelFor(group) {
 }
 
 const OPTIONS_KEY = "arctictab:options";
+const DEFAULT_AUTO_ANCHORS = [
+  { tabs: 10, groups: 3 },
+  { tabs: 15, groups: 4 },
+  { tabs: 25, groups: 5 },
+];
 const OPTIONS_DEFAULTS = {
   excludePinned: true,
-  rearrange: false,
+  groupBySimilarity: false,
+  reorganizeGroups: false,
   hideApplyGroups: false,
   hideRearrange: false,
   autoApplyGroups: false,
+  autoApplyNaming: true,
   nameStyle: "mixed",
   headSim: 0.22,
   curatedSim: 0.27,
   keywordFrac: 0.34,
+  autoGroupAnchors: DEFAULT_AUTO_ANCHORS,
 };
+
+function computeAutoGroupCount(tabCount, anchors) {
+  const list = (anchors && anchors.length ? anchors : DEFAULT_AUTO_ANCHORS)
+    .filter((a) => a && a.tabs > 0 && a.groups > 0)
+    .slice()
+    .sort((a, b) => a.tabs - b.tabs);
+  if (list.length === 0) return Math.max(1, Math.round(tabCount / 8));
+  if (tabCount <= list[0].tabs) return list[0].groups;
+  for (let i = 1; i < list.length; i++) {
+    if (tabCount <= list[i].tabs) {
+      const a = list[i - 1];
+      const b = list[i];
+      const t = (tabCount - a.tabs) / (b.tabs - a.tabs);
+      return a.groups + t * (b.groups - a.groups);
+    }
+  }
+  const n = list.length;
+  const a = list[n - 2] || list[n - 1];
+  const b = list[n - 1];
+  const span = Math.max(1, b.tabs - a.tabs);
+  const slope = (b.groups - a.groups) / span;
+  return b.groups + (tabCount - b.tabs) * slope;
+}
 let options = { ...OPTIONS_DEFAULTS };
+let appliedSnapshot = null;
+function effectiveAutoApplyNaming() {
+  return options.autoApplyGroups || options.autoApplyNaming;
+}
 function applyButtonVisibility() {
-  applyBtn.classList.toggle("hidden", !!options.hideApplyGroups);
+  const autoSyncing = effectiveAutoApplyNaming();
+  applyBtn.classList.toggle("hidden", !!options.hideApplyGroups || autoSyncing);
   rearrangeBtn.classList.toggle("hidden", !!options.hideRearrange);
 }
 async function loadOptions() {
@@ -86,6 +142,7 @@ browser.storage.onChanged.addListener((changes, area) => {
   options = { ...OPTIONS_DEFAULTS, ...(changes[OPTIONS_KEY].newValue || {}) };
   log("options updated", options);
   applyButtonVisibility();
+  resetRefreshFingerprints();
   scheduleRefresh("options-changed");
 });
 
@@ -107,6 +164,7 @@ async function loadSettings() {
     if (v && typeof v === "object") {
       if (typeof v.window === "number") slider.value = String(v.window);
       if (typeof v.penalty === "number") penaltySlider.value = String(v.penalty);
+      if (typeof v.smallPenalty === "number") smallPenaltySlider.value = String(v.smallPenalty);
       if (typeof v.controlSize === "boolean") controlChk.checked = v.controlSize;
     }
   } catch (e) {
@@ -116,8 +174,9 @@ async function loadSettings() {
 function saveSettings() {
   browser.storage.local.set({
     [SETTINGS_KEY]: {
-      window: +slider.value,
+      window: windowFromSlider(),
       penalty: +penaltySlider.value,
+      smallPenalty: +smallPenaltySlider.value,
       controlSize: controlChk.checked,
     },
   }).catch((e) => console.warn("[arctictab] saveSettings failed", e));
@@ -125,10 +184,12 @@ function saveSettings() {
 
 slider.addEventListener("input", () => { updateWindowDisplay(); saveSettings(); scheduleRecluster(); });
 penaltySlider.addEventListener("input", () => { updatePenaltyDisplay(); saveSettings(); scheduleRecluster(); });
+smallPenaltySlider.addEventListener("input", () => { updateSmallPenaltyDisplay(); saveSettings(); scheduleRecluster(); });
 controlChk.addEventListener("change", () => { applyControlVisibility(); saveSettings(); scheduleRecluster(); });
-loadSettings().then(() => { updateWindowDisplay(); updatePenaltyDisplay(); applyControlVisibility(); });
+loadSettings().then(() => { updateWindowDisplay(); updatePenaltyDisplay(); updateSmallPenaltyDisplay(); applyControlVisibility(); });
 updateWindowDisplay();
 updatePenaltyDisplay();
+updateSmallPenaltyDisplay();
 applyControlVisibility();
 
 onExtractorProgress((p) => {
@@ -147,7 +208,12 @@ applyBtn.addEventListener("click", async () => {
   applyBtn.disabled = true;
   try {
     status("applying tab groups...");
-    await applyTabGroups(state.lastGroups);
+    if (!effectiveAutoApplyNaming()) {
+      await assignNames(state.lastGroups, state.texts, state.tabs, state.embeddings);
+    }
+    updateAppliedSnapshot(state.lastGroups);
+    await applyTabGroups(state.lastGroups, { rearrange: false });
+    renderGroups(state.lastGroups);
     status(`applied ${state.lastGroups.length} groups.`);
   } catch (e) {
     console.error(e);
@@ -158,16 +224,28 @@ applyBtn.addEventListener("click", async () => {
 });
 
 rearrangeBtn.addEventListener("click", async () => {
-  if (!state?.lastGroups) return;
   rearrangeBtn.disabled = true;
   try {
-    status("rearranging tabs...");
-    await rearrangeTabs(state.lastGroups);
-    status(`rearranged ${state.lastGroups.length} groups.`);
+    status("recomputing best clusters...");
+    skipNextAutoApply = true;
+    await refresh({ silent: true, reclusterOpts: { forceSimilarity: true }, force: true });
+    if (!state?.lastGroups?.length) {
+      status("no clusters available to re-organize.");
+      return;
+    }
+    if (!effectiveAutoApplyNaming()) {
+      await assignNames(state.lastGroups, state.texts, state.tabs, state.embeddings);
+      updateAppliedSnapshot(state.lastGroups);
+    }
+    status(`re-organizing into ${state.lastGroups.length} fresh clusters...`);
+    const r = await applyTabGroups(state.lastGroups);
+    if (r?.moved) status(`re-organized: moved ${r.moved} tabs into ${r.grouped} Firefox tab groups.`);
+    else if (r?.grouped) status(`re-organized: ${r.grouped} Firefox tab groups applied (tabs already in order).`);
+    else status(`re-organize: nothing to change.`);
     scheduleRefresh("rearrange-done");
   } catch (e) {
     console.error(e);
-    status("rearrange error: " + (e?.message || e));
+    status("re-organize error: " + (e?.message || e));
   } finally {
     rearrangeBtn.disabled = false;
   }
@@ -189,6 +267,48 @@ logsBtn.addEventListener("click", async () => {
   }
 });
 
+const copyStateBtn = $("#copy-state-btn");
+copyStateBtn.addEventListener("click", async () => {
+  copyStateBtn.disabled = true;
+  try {
+    const allTabs = await browser.tabs.query({ currentWindow: true });
+    const tabIdToGroupIdx = new Map();
+    (state?.lastGroups || []).forEach((g, gi) => g.forEach((t) => tabIdToGroupIdx.set(t.id, gi)));
+    const snapshot = {
+      timestamp: new Date().toISOString(),
+      options,
+      sizeControl: { enabled: controlChk.checked, target: windowFromSlider(), penalty: penaltyFromSlider(), smallPenalty: smallPenaltyFromSlider() },
+      windowTabs: allTabs
+        .sort((a, b) => a.index - b.index)
+        .map((t) => ({
+          index: t.index,
+          id: t.id,
+          pinned: t.pinned,
+          active: t.active,
+          groupId: t.groupId ?? null,
+          url: t.url,
+          title: t.title,
+          inClusterIdx: tabIdToGroupIdx.has(t.id) ? tabIdToGroupIdx.get(t.id) : null,
+        })),
+      clusterGroups: (state?.lastGroups || []).map((g, gi) => ({
+        idx: gi,
+        name: labelFor(g),
+        tabIds: g.map((t) => t.id),
+        urls: g.map((t) => t.url),
+      })),
+    };
+    const json = JSON.stringify(snapshot, null, 2);
+    await navigator.clipboard.writeText(json);
+    log(`copy-state: ${snapshot.windowTabs.length} tabs, ${snapshot.clusterGroups.length} clusters → clipboard (${json.length} chars)`);
+    status(`copied state: ${snapshot.windowTabs.length} tabs, ${snapshot.clusterGroups.length} clusters.`);
+  } catch (e) {
+    console.error(e);
+    status("copy-state error: " + (e?.message || e));
+  } finally {
+    copyStateBtn.disabled = false;
+  }
+});
+
 function scheduleRecluster() {
   if (!state) return;
   clearTimeout(rerunTimer);
@@ -197,42 +317,73 @@ function scheduleRecluster() {
   }, 80);
 }
 
-async function recluster() {
+async function recluster({ forceSimilarity = false } = {}) {
   console.assert(state != null, "state must exist");
   const { tabs, embeddings, texts } = state;
   let groups, threshold, avg, iterations, statusMsg;
+  const useSimilarity = forceSimilarity || options.groupBySimilarity;
+  const mode = useSimilarity ? "agglomerative" : "linear";
   if (controlChk.checked) {
-    const target = WINDOW_STOPS[+slider.value];
+    const target = windowFromSlider();
     const sizePenalty = penaltyFromSlider();
-    log(`recluster: ${tabs.length} tabs, target=${target}, penalty=${sizePenalty.toFixed(2)}`);
-    ({ groups, threshold, avg, iterations } = detectExcursionsTargeted(
-      tabs,
-      embeddings,
-      { targetAvgSize: target, sizePenalty },
-    ));
-    statusMsg = `${groups.length} groups, avg ${avg.toFixed(1)} (target ${target}, thr ${threshold.toFixed(2)}, ${iterations} iter)`;
+    const smallSizePenalty = smallPenaltyFromSlider();
+    log(`recluster (${mode}): ${tabs.length} tabs, target=${target}, penalty=${sizePenalty.toFixed(2)}, smallPenalty=${smallSizePenalty.toFixed(2)}`);
+    const targetedFn = useSimilarity ? clusterByEmbeddingsTargeted : detectExcursionsTargeted;
+    ({ groups, threshold, avg, iterations } = targetedFn(tabs, embeddings, { targetAvgSize: target, sizePenalty, smallSizePenalty }));
+    statusMsg = `${groups.length} groups, avg ${avg.toFixed(1)} (${mode}, target ${target}, thr ${threshold.toFixed(2)}, ${iterations} iter)`;
   } else {
-    log(`recluster (auto): ${tabs.length} tabs, thr=${FREE_THRESHOLD}`);
-    groups = detectExcursions(tabs, embeddings, { cosineDropThreshold: FREE_THRESHOLD });
-    threshold = FREE_THRESHOLD;
-    avg = tabs.length / Math.max(1, groups.length);
-    statusMsg = `${groups.length} groups, avg ${avg.toFixed(1)} (auto, thr ${threshold.toFixed(2)})`;
+    const desired = Math.max(1, Math.round(computeAutoGroupCount(tabs.length, options.autoGroupAnchors)));
+    const target = Math.max(1, tabs.length / desired);
+    const sizePenalty = penaltyFromSlider();
+    const smallSizePenalty = smallPenaltyFromSlider();
+    log(`recluster (${mode}, auto): ${tabs.length} tabs → ${desired} groups, target=${target.toFixed(2)}, penalty=${sizePenalty.toFixed(2)}, smallPenalty=${smallSizePenalty.toFixed(2)}`);
+    const targetedFn = useSimilarity ? clusterByEmbeddingsTargeted : detectExcursionsTargeted;
+    ({ groups, threshold, avg, iterations } = targetedFn(tabs, embeddings, { targetAvgSize: target, sizePenalty, smallSizePenalty }));
+    statusMsg = `${groups.length} groups, avg ${avg.toFixed(1)} (${mode}, auto target ${target.toFixed(1)} for ${desired})`;
   }
   state.lastGroups = groups;
   state.clusterResult = { threshold, avg, iterations };
   log(`recluster result: ${groups.length} groups, avg ${avg.toFixed(1)}, thr ${threshold.toFixed(2)}`);
   const currentKeys = new Set(groups.map(groupKey));
   for (const k of customLabels.keys()) if (!currentKeys.has(k)) customLabels.delete(k);
-  await assignNames(groups, texts, tabs, embeddings);
+  if (effectiveAutoApplyNaming()) {
+    await assignNames(groups, texts, tabs, embeddings);
+    updateAppliedSnapshot(groups);
+  }
   renderGroups(groups);
   status(statusMsg);
-  logTabSnapshot();
-  if (options.autoApplyGroups && !autoApplying) {
-    autoApplying = true;
-    try { await applyTabGroups(groups); }
-    catch (e) { console.warn("[arctictab] auto-apply failed", e); }
-    finally { autoApplying = false; }
+  if (!autoApplying && !skipNextAutoApply) {
+    if (options.autoApplyGroups) {
+      autoApplying = true;
+      try {
+        const r = await applyTabGroups(groups, { captureUndo: false });
+        if (r?.moved) status(`auto-apply: moved ${r.moved} tabs, ${r.grouped} groups.`);
+        else if (r?.grouped) status(`auto-apply: ${r.grouped} groups applied (tabs already in order).`);
+        else status(`auto-apply: nothing to change.`);
+      }
+      catch (e) { console.warn("[arctictab] auto-apply failed", e); }
+      finally { autoApplying = false; }
+    } else if (options.autoApplyNaming) {
+      autoApplying = true;
+      try {
+        const r = await applyTabGroups(groups, { rearrange: false, captureUndo: false });
+        if (r?.grouped) status(`auto-apply: ${r.grouped} groups synced.`);
+        else status(`auto-apply: nothing to change.`);
+      }
+      catch (e) { console.warn("[arctictab] auto-apply (no rearrange) failed", e); }
+      finally { autoApplying = false; }
+    }
+  } else if (skipNextAutoApply) {
+    skipNextAutoApply = false;
+    log("recluster: skipped one auto-apply (undo guard)");
   }
+}
+
+function updateAppliedSnapshot(groups) {
+  appliedSnapshot = groups.map((g) => ({
+    name: labelFor(g),
+    tabIds: g.map((t) => t.id),
+  }));
 }
 
 async function assignNames(groups, texts, tabs, embeddings) {
@@ -260,9 +411,7 @@ async function assignNames(groups, texts, tabs, embeddings) {
 const LOG_DIR_PREFIX = "arctictab";
 const SESSION_START_ISO = new Date().toISOString().replace(/[:.]/g, "-");
 const SESSION_LOG_NAME = `${LOG_DIR_PREFIX}/session-${SESSION_START_ISO}.log`;
-const LOG_FLUSH_MS = 30 * 1000;
 const logBuffer = [];
-let logFlushTimer = null;
 
 async function downloadBlob(filename, blob, conflictAction) {
   const url = URL.createObjectURL(blob);
@@ -274,26 +423,15 @@ async function downloadBlob(filename, blob, conflictAction) {
 }
 
 async function flushLogsNow() {
-  if (logFlushTimer != null) { clearTimeout(logFlushTimer); logFlushTimer = null; }
   if (!logBuffer.length) return;
   const text = logBuffer.join("");
   await downloadBlob(SESSION_LOG_NAME, new Blob([text], { type: "text/plain" }), "overwrite");
-}
-
-function scheduleLogFlush() {
-  if (logFlushTimer != null) return;
-  logFlushTimer = setTimeout(async () => {
-    logFlushTimer = null;
-    try { await flushLogsNow(); }
-    catch (e) { console.warn("[arctictab] session log flush failed", e); }
-  }, LOG_FLUSH_MS);
 }
 
 const log = (...args) => {
   console.log("[arctictab]", ...args);
   const parts = args.map((a) => (typeof a === "string" ? a : JSON.stringify(a)));
   logBuffer.push(`${new Date().toISOString()} [arctictab] ${parts.join(" ")}\n`);
-  scheduleLogFlush();
 };
 
 function groupCentroid(group, tabIdxById, embeddings) {
@@ -324,8 +462,9 @@ async function logTabSnapshot({ force = false } = {}) {
     tabCount: state.tabs.length,
     groupCount: state.lastGroups.length,
     settings: {
-      windowTarget: WINDOW_STOPS[+slider.value],
+      windowTarget: windowFromSlider(),
       sizePenalty: penaltyFromSlider(),
+      smallSizePenalty: smallPenaltyFromSlider(),
       ...options,
     },
     clusterResult: state.clusterResult ?? null,
@@ -358,8 +497,6 @@ async function logTabSnapshot({ force = false } = {}) {
   }
 }
 
-setInterval(logTabSnapshot, 30 * 60 * 1000);
-
 async function queryTabs(retries = 3) {
   const filter = (tabs) => options.excludePinned ? tabs.filter((t) => !t.pinned) : tabs;
   for (let attempt = 0; attempt < retries; attempt++) {
@@ -374,9 +511,26 @@ async function queryTabs(retries = 3) {
 }
 
 let refreshId = 0;
-async function refresh({ silent = false } = {}) {
+let lastTabsFingerprint = null;
+let lastTextsFingerprint = null;
+
+function stableTitle(title) {
+  return (title || "").replace(/^\(\d+\)\s*/, "").trim();
+}
+function tabsFingerprint(tabs) {
+  return tabs.map((t) => `${t.id}\x1f${t.index}\x1f${t.url || ""}\x1f${stableTitle(t.title)}\x1f${t.pinned ? 1 : 0}`).join("\x1e");
+}
+function textsFingerprintFor(tabs, texts) {
+  return tabs.map((t, i) => `${t.id}\x1f${texts[i] || ""}`).join("\x1e");
+}
+function resetRefreshFingerprints() {
+  lastTabsFingerprint = null;
+  lastTextsFingerprint = null;
+}
+
+async function refresh({ silent = false, reclusterOpts = {}, force = false } = {}) {
   const id = ++refreshId;
-  log(`refresh #${id} start (silent=${silent})`);
+  log(`refresh #${id} start (silent=${silent}, force=${force})`);
   if (!silent) {
     status("loading model...");
     $("#groups").innerHTML = '<div class="placeholder">Loading model and embedding tabs...</div>';
@@ -394,11 +548,25 @@ async function refresh({ silent = false } = {}) {
     return;
   }
 
+  const tabsFp = tabsFingerprint(tabs);
+  if (!force && tabsFp === lastTabsFingerprint && state?.lastGroups) {
+    log(`refresh #${id} skipped: tabs fingerprint unchanged`);
+    return;
+  }
+  lastTabsFingerprint = tabsFp;
+
   if (!silent) status(`scraping metadata for ${tabs.length} tabs...`);
   const tMeta = performance.now();
   const metas = await Promise.all(tabs.map(getMeta));
   const texts = tabs.map((t, i) => buildText(t, metas[i]));
   log(`refresh #${id} metas done in ${(performance.now() - tMeta).toFixed(0)}ms, ${metas.filter(Boolean).length}/${tabs.length} had meta`);
+
+  const textsFp = textsFingerprintFor(tabs, texts);
+  if (!force && textsFp === lastTextsFingerprint && state?.lastGroups) {
+    log(`refresh #${id} skipped: texts fingerprint unchanged`);
+    return;
+  }
+  lastTextsFingerprint = textsFp;
 
   const cached = await getMany(tabs.map((t) => t.url));
   const embeddings = new Array(tabs.length);
@@ -440,7 +608,7 @@ async function refresh({ silent = false } = {}) {
 
   state = { tabs, embeddings, texts, lastGroups: null };
   log(`refresh #${id} state set, calling recluster`);
-  await recluster();
+  await recluster(reclusterOpts);
   log(`refresh #${id} done`);
 }
 
@@ -481,6 +649,14 @@ browser.tabs.onUpdated.addListener((tabId, changeInfo) => {
     log("tabs.onUpdated trigger", tabId, changeInfo);
     scheduleRefresh("onUpdated");
   }
+});
+let sidebarWindowId = null;
+browser.windows.getCurrent().then((w) => { sidebarWindowId = w.id; });
+browser.tabs.onActivated.addListener(({ tabId, windowId }) => {
+  if (sidebarWindowId !== null && windowId !== sidebarWindowId) return;
+  for (const el of document.querySelectorAll(".tab.active")) el.classList.remove("active");
+  const row = document.querySelector(`.tab[data-tab-id="${tabId}"]`);
+  if (row) row.classList.add("active");
 });
 log("tabs.* listeners registered");
 
@@ -529,6 +705,158 @@ async function ungroupAll(tabIds) {
   }
 }
 
+let lastUndoSnapshot = null;
+let skipNextAutoApply = false;
+const undoBtn = $("#undo-btn");
+
+function setUndoEnabled(enabled) {
+  if (undoBtn) undoBtn.disabled = !enabled;
+}
+
+async function captureUndoSnapshot(label, { closingTabIds = [] } = {}) {
+  try {
+    const tabs = await browser.tabs.query({ currentWindow: true });
+    const groupIds = [...new Set(tabs.map((t) => t.groupId).filter((g) => g != null && g !== -1))];
+    const groupMeta = new Map();
+    if (browser.tabGroups?.get) {
+      for (const gid of groupIds) {
+        try {
+          const g = await browser.tabGroups.get(gid);
+          groupMeta.set(gid, { title: g.title || "", color: g.color || null });
+        } catch (e) { log(`undo-snapshot: tabGroups.get(${gid}) failed: ${e?.message || e}`); }
+      }
+    }
+    const closingSet = new Set(closingTabIds);
+    const closedTabs = tabs
+      .filter((t) => closingSet.has(t.id))
+      .map((t) => ({
+        origId: t.id,
+        url: t.url,
+        title: t.title || "",
+        index: t.index,
+        pinned: !!t.pinned,
+        groupId: t.groupId ?? -1,
+      }));
+    const windowId = tabs[0]?.windowId;
+    lastUndoSnapshot = {
+      label,
+      tabs: tabs.map((t) => ({ id: t.id, index: t.index, groupId: t.groupId ?? -1 })),
+      groupMeta,
+      closedTabs,
+      windowId,
+      timestamp: Date.now(),
+    };
+    setUndoEnabled(true);
+    log(`undo-snapshot [${label}]: ${lastUndoSnapshot.tabs.length} tabs, ${groupIds.length} native groups, ${closedTabs.length} closing, windowId=${windowId}`);
+    if (closingTabIds.length) {
+      const missing = closingTabIds.filter((id) => !tabs.find((t) => t.id === id));
+      if (missing.length) log(`undo-snapshot [${label}]: WARN ${missing.length} closingTabIds not found in window (ids: ${missing.join(",")})`);
+    }
+  } catch (e) {
+    log(`undo-snapshot [${label}] failed: ${e?.message || e}`);
+  }
+}
+
+async function applyUndoSnapshot() {
+  if (!lastUndoSnapshot) { status("nothing to undo."); return; }
+  const snap = lastUndoSnapshot;
+  log(`undo: restoring snapshot [${snap.label}] (${snap.tabs.length} tabs)`);
+  suppressMoveRefresh++;
+  try {
+    const closedIdMap = new Map();
+    const sortedClosed = [...(snap.closedTabs || [])].sort((a, b) => a.index - b.index);
+    log(`undo: snapshot has ${sortedClosed.length} closed tabs to reopen`);
+    let recreated = 0;
+    for (const c of sortedClosed) {
+      try {
+        const createArgs = {
+          url: c.url,
+          active: false,
+          pinned: c.pinned,
+          index: c.index,
+        };
+        if (snap.windowId != null) createArgs.windowId = snap.windowId;
+        const created = await browser.tabs.create(createArgs);
+        closedIdMap.set(c.origId, created.id);
+        recreated++;
+        log(`undo: recreated ${c.url} → new id ${created.id}`);
+      } catch (e) {
+        log(`undo: recreate ${c.url} failed: ${e?.message || e}`);
+      }
+    }
+
+    const live = await browser.tabs.query({ currentWindow: true });
+    const liveIds = new Set(live.map((t) => t.id));
+    const restorable = snap.tabs
+      .map((t) => {
+        if (closedIdMap.has(t.id)) return { ...t, id: closedIdMap.get(t.id) };
+        return liveIds.has(t.id) ? t : null;
+      })
+      .filter(Boolean);
+    if (restorable.length !== snap.tabs.length) {
+      log(`undo: ${snap.tabs.length - restorable.length} snapshotted tab(s) no longer exist; skipping those`);
+    }
+
+    if (browser.tabs.ungroup) {
+      try { await browser.tabs.ungroup(restorable.map((t) => t.id)); }
+      catch (e) { log(`undo: ungroup failed: ${e?.message || e}`); }
+    }
+
+    const sorted = [...restorable].sort((a, b) => a.index - b.index);
+    for (const t of sorted) {
+      try { await browser.tabs.move(t.id, { index: t.index }); }
+      catch (e) { log(`undo: move tab ${t.id} → ${t.index} failed: ${e?.message || e}`); }
+    }
+
+    const byOrigGid = new Map();
+    for (const t of restorable) {
+      if (t.groupId == null || t.groupId === -1) continue;
+      if (!byOrigGid.has(t.groupId)) byOrigGid.set(t.groupId, []);
+      byOrigGid.get(t.groupId).push(t.id);
+    }
+    let regrouped = 0;
+    for (const [origGid, ids] of byOrigGid) {
+      if (ids.length < 1) continue;
+      try {
+        const newGid = await browser.tabs.group({ tabIds: ids });
+        const meta = snap.groupMeta?.get(origGid);
+        if (meta && browser.tabGroups?.update) {
+          const update = {};
+          if (meta.title) update.title = meta.title;
+          if (meta.color) update.color = meta.color;
+          if (Object.keys(update).length) await browser.tabGroups.update(newGid, update);
+        }
+        regrouped++;
+      } catch (e) {
+        log(`undo: regroup ${ids.length} tabs (orig gid ${origGid}) failed: ${e?.message || e}`);
+      }
+    }
+    const reopenMsg = sortedClosed.length
+      ? `, reopened ${recreated}/${sortedClosed.length} closed tab(s)`
+      : "";
+    status(`undid ${snap.label}: restored ${restorable.length} tabs, ${regrouped} groups${reopenMsg}.`);
+    log(`undo complete: ${restorable.length} tabs restored, ${regrouped} groups recreated, ${recreated}/${sortedClosed.length} closed tabs reopened`);
+  } catch (e) {
+    console.error(e);
+    status("undo error: " + (e?.message || e));
+    log(`undo failed: ${e?.message || e}`);
+  } finally {
+    setTimeout(() => { suppressMoveRefresh--; }, 500);
+    lastUndoSnapshot = null;
+    setUndoEnabled(false);
+    skipNextAutoApply = true;
+    scheduleRefresh("undo-done");
+  }
+}
+
+if (undoBtn) {
+  undoBtn.addEventListener("click", async () => {
+    undoBtn.disabled = true;
+    try { await applyUndoSnapshot(); }
+    finally { setUndoEnabled(!!lastUndoSnapshot); }
+  });
+}
+
 async function snapshotTabOrder(label, ids) {
   try {
     const tabs = await browser.tabs.query({ currentWindow: true });
@@ -540,7 +868,16 @@ async function snapshotTabOrder(label, ids) {
 
 async function rearrangeTabs(groups) {
   const ordered = [];
-  for (const g of groups) for (const t of g) if (isGroupable(t)) ordered.push(t.id);
+  for (const g of groups) {
+    if (options.groupBySimilarity) {
+      const groupable = g.filter(isGroupable);
+      const rest = g.filter((t) => !isGroupable(t));
+      for (const t of groupable) ordered.push(t.id);
+      for (const t of rest) ordered.push(t.id);
+    } else {
+      for (const t of g) ordered.push(t.id);
+    }
+  }
   log(`rearrange: ${ordered.length} tabs target cluster order`);
 
   const currentTabs = await browser.tabs.query({ currentWindow: true });
@@ -553,21 +890,39 @@ async function rearrangeTabs(groups) {
     && liveOrder.every((id, i) => id === ordered[i]);
   if (alreadyOrdered) {
     log("rearrange: tabs already in cluster order, skipping moves");
-    return;
+    return { moved: 0, total: ordered.length };
   }
 
   suppressMoveRefresh++;
+  let moved = 0;
   try {
     await ungroupAll(ordered);
     await browser.tabs.move(ordered, { index: -1 });
+    moved = ordered.length;
     log("rearrange: move completed");
   } catch (e) { console.warn("rearrange failed", e); log(`rearrange error: ${e?.message || e}`); }
   finally { setTimeout(() => { suppressMoveRefresh--; }, 250); }
+  return { moved, total: ordered.length };
 }
 
-async function applyTabGroups(groups) {
-  suppressMovesFor(500);
-  if (options.rearrange) await rearrangeTabs(groups);
+async function applyTabGroups(groups, { rearrange = true, captureUndo = true } = {}) {
+  if (captureUndo) await captureUndoSnapshot("apply-groups");
+  let moved = 0;
+  let total = 0;
+  if (rearrange) {
+    if (options.reorganizeGroups && state?.tabs && state?.embeddings) {
+      const before = groups.map((g) => g[0]?.id);
+      groups = orderGroupsBySimilarity(groups, state.tabs, state.embeddings);
+      const after = groups.map((g) => g[0]?.id);
+      const changed = before.length !== after.length || before.some((id, i) => id !== after[i]);
+      if (changed) log(`reorganize-groups: reordered ${groups.length} groups by similarity`);
+    }
+    suppressMovesFor(500);
+    const r = await rearrangeTabs(groups);
+    moved = r?.moved ?? 0;
+    total = r?.total ?? 0;
+  }
+  let grouped = 0;
   for (const g of groups) {
     const groupable = g.filter(isGroupable);
     if (groupable.length < 2) continue;
@@ -576,130 +931,199 @@ async function applyTabGroups(groups) {
     try {
       const gid = await browser.tabs.group({ tabIds: ids });
       await browser.tabGroups.update(gid, { title: label });
+      grouped++;
     } catch (e) {
       console.warn("tab grouping failed for", label, e);
     }
   }
+  return { moved, total, grouped };
+}
+
+function createTabRow(t) {
+  const row = document.createElement("div");
+  row.className = "tab";
+  if (t.active) row.classList.add("active");
+  row.setAttribute("draggable", "true");
+  row.draggable = true;
+  row.dataset.tabId = String(t.id);
+  row.title = `${t.title || ""}\n${t.url || ""}`.trim();
+  row.addEventListener("mousedown", () => log(`mousedown on tab row ${t.id}`));
+  row.addEventListener("dragstart", (e) => {
+    log(`dragstart tab ${t.id}`);
+    e.dataTransfer.setData("text/plain", String(t.id));
+    e.dataTransfer.effectAllowed = "move";
+    row.classList.add("dragging");
+  });
+  row.addEventListener("dragend", () => {
+    row.classList.remove("dragging");
+    document.querySelectorAll(".tab.drop-before, .tab.drop-after")
+      .forEach((el) => el.classList.remove("drop-before", "drop-after"));
+  });
+  row.addEventListener("dragover", (e) => {
+    e.preventDefault();
+    e.dataTransfer.dropEffect = "move";
+    const r = row.getBoundingClientRect();
+    const before = (e.clientY - r.top) < r.height / 2;
+    row.classList.toggle("drop-before", before);
+    row.classList.toggle("drop-after", !before);
+  });
+  row.addEventListener("dragleave", () => {
+    row.classList.remove("drop-before", "drop-after");
+  });
+  row.addEventListener("drop", async (e) => {
+    e.preventDefault();
+    const r = row.getBoundingClientRect();
+    const before = (e.clientY - r.top) < r.height / 2;
+    row.classList.remove("drop-before", "drop-after");
+    const sourceId = +e.dataTransfer.getData("text/plain");
+    if (!sourceId || sourceId === t.id) return;
+    await reorderTabByDrop(sourceId, t.id, before);
+  });
+  const fav = document.createElement("img");
+  fav.className = "favicon";
+  fav.alt = "";
+  fav.referrerPolicy = "no-referrer";
+  let faviconAttempts = 0;
+  fav.addEventListener("error", () => {
+    faviconAttempts++;
+    if (faviconAttempts === 1) {
+      const fb = fallbackFaviconUrl(t);
+      if (fb !== fav.src) { fav.src = fb; return; }
+    }
+    fav.src = TRANSPARENT_PX;
+  });
+  fav.src = faviconUrlFor(t);
+  const titleSpan = document.createElement("span");
+  titleSpan.className = "title";
+  titleSpan.textContent = t.title || t.url;
+  const hostSpan = document.createElement("span");
+  hostSpan.className = "host";
+  try { hostSpan.textContent = new URL(t.url).hostname.replace(/^www\./, ""); } catch {}
+  const closeTabBtn = document.createElement("button");
+  closeTabBtn.className = "t-btn";
+  closeTabBtn.title = "Close tab";
+  closeTabBtn.textContent = "×";
+  closeTabBtn.addEventListener("click", (e) => {
+    e.stopPropagation();
+    closeTabs([t.id]);
+  });
+  row.appendChild(fav);
+  row.appendChild(titleSpan);
+  row.appendChild(hostSpan);
+  row.appendChild(closeTabBtn);
+  row.addEventListener("click", () => browser.tabs.update(t.id, { active: true }));
+  return row;
+}
+
+function createGroupCard(tabsInGroup, { label, getCurrentLabel, onRename, onBookmark, onClose }) {
+  const div = document.createElement("div");
+  div.className = "group";
+  const header = document.createElement("div");
+  header.className = "group-header";
+  const title = document.createElement("h3");
+  title.textContent = label;
+  title.contentEditable = "true";
+  title.spellcheck = false;
+  title.title = "Click to rename";
+  title.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") { e.preventDefault(); title.blur(); }
+    if (e.key === "Escape") { title.textContent = getCurrentLabel(); title.blur(); }
+  });
+  title.addEventListener("blur", () => {
+    const newLabel = title.textContent.trim();
+    if (!newLabel) { title.textContent = getCurrentLabel(); return; }
+    onRename(newLabel);
+  });
+  header.appendChild(title);
+
+  const star = document.createElement("button");
+  star.className = "g-btn";
+  star.title = "Bookmark group";
+  star.textContent = "★";
+  star.addEventListener("click", (e) => {
+    e.stopPropagation();
+    onBookmark(title.textContent.trim() || label);
+  });
+  header.appendChild(star);
+
+  const close = document.createElement("button");
+  close.className = "g-btn";
+  close.title = "Close group";
+  close.textContent = "×";
+  close.addEventListener("click", (e) => {
+    e.stopPropagation();
+    onClose();
+  });
+  header.appendChild(close);
+
+  div.appendChild(header);
+  for (const t of tabsInGroup) div.appendChild(createTabRow(t));
+  return div;
 }
 
 function renderGroups(groups) {
   const main = $("#groups");
   main.innerHTML = "";
+  const frozen = !effectiveAutoApplyNaming();
+  if (frozen && appliedSnapshot && appliedSnapshot.length && state?.tabs) {
+    renderFrozenView(main);
+  } else {
+    renderLiveView(main, groups);
+  }
+}
+
+function renderLiveView(main, groups) {
   const ordered = groups
     .map((g) => [...g].sort((a, b) => a.index - b.index))
     .sort((a, b) => a[0].index - b[0].index);
   for (const g of ordered) {
-    const div = document.createElement("div");
-    div.className = "group";
-
-    const header = document.createElement("div");
-    header.className = "group-header";
-    const label = labelFor(g);
-    const title = document.createElement("h3");
-    title.textContent = label;
-    title.contentEditable = "true";
-    title.spellcheck = false;
-    title.title = "Click to rename";
-    title.addEventListener("keydown", (e) => {
-      if (e.key === "Enter") { e.preventDefault(); title.blur(); }
-      if (e.key === "Escape") { title.textContent = labelFor(g); title.blur(); }
+    const card = createGroupCard(g, {
+      label: labelFor(g),
+      getCurrentLabel: () => labelFor(g),
+      onRename: (newLabel) => customLabels.set(groupKey(g), newLabel),
+      onBookmark: (label) => bookmarkGroup(label, g),
+      onClose: () => closeGroup(g),
     });
-    title.addEventListener("blur", () => {
-      const newLabel = title.textContent.trim();
-      if (!newLabel) { title.textContent = labelFor(g); return; }
-      customLabels.set(groupKey(g), newLabel);
+    main.appendChild(card);
+  }
+}
+
+function renderFrozenView(main) {
+  const tabById = new Map(state.tabs.map((t) => [t.id, t]));
+  const used = new Set();
+  const orderedEntries = appliedSnapshot
+    .map((entry) => {
+      const tabs = entry.tabIds.map((id) => tabById.get(id)).filter(Boolean);
+      tabs.sort((a, b) => a.index - b.index);
+      return { entry, tabs };
+    })
+    .filter(({ tabs }) => tabs.length > 0)
+    .sort((a, b) => a.tabs[0].index - b.tabs[0].index);
+  for (const { entry, tabs } of orderedEntries) {
+    tabs.forEach((t) => used.add(t.id));
+    const card = createGroupCard(tabs, {
+      label: entry.name,
+      getCurrentLabel: () => entry.name,
+      onRename: (newLabel) => {
+        entry.name = newLabel;
+        const k = [...entry.tabIds].sort((a, b) => a - b).join(",");
+        customLabels.set(k, newLabel);
+      },
+      onBookmark: (label) => bookmarkGroup(label, tabs),
+      onClose: () => closeTabs(tabs.map((t) => t.id)),
     });
-    header.appendChild(title);
-
-    const star = document.createElement("button");
-    star.className = "g-btn";
-    star.title = "Bookmark group";
-    star.textContent = "★";
-    star.addEventListener("click", (e) => {
-      e.stopPropagation();
-      bookmarkGroup(title.textContent.trim() || label, g);
-    });
-    header.appendChild(star);
-
-    const close = document.createElement("button");
-    close.className = "g-btn";
-    close.title = "Close group";
-    close.textContent = "×";
-    close.addEventListener("click", (e) => {
-      e.stopPropagation();
-      closeGroup(g);
-    });
-    header.appendChild(close);
-
-    div.appendChild(header);
-
-    for (const t of g) {
-      const row = document.createElement("div");
-      row.className = "tab";
-      row.setAttribute("draggable", "true");
-      row.draggable = true;
-      row.dataset.tabId = String(t.id);
-      row.title = `${t.title || ""}\n${t.url || ""}`.trim();
-      row.addEventListener("mousedown", () => log(`mousedown on tab row ${t.id}`));
-      row.addEventListener("dragstart", (e) => {
-        log(`dragstart tab ${t.id}`);
-        e.dataTransfer.setData("text/plain", String(t.id));
-        e.dataTransfer.effectAllowed = "move";
-        row.classList.add("dragging");
-      });
-      row.addEventListener("dragend", () => {
-        row.classList.remove("dragging");
-        document.querySelectorAll(".tab.drop-before, .tab.drop-after")
-          .forEach((el) => el.classList.remove("drop-before", "drop-after"));
-      });
-      row.addEventListener("dragover", (e) => {
-        e.preventDefault();
-        e.dataTransfer.dropEffect = "move";
-        const r = row.getBoundingClientRect();
-        const before = (e.clientY - r.top) < r.height / 2;
-        row.classList.toggle("drop-before", before);
-        row.classList.toggle("drop-after", !before);
-      });
-      row.addEventListener("dragleave", () => {
-        row.classList.remove("drop-before", "drop-after");
-      });
-      row.addEventListener("drop", async (e) => {
-        e.preventDefault();
-        const r = row.getBoundingClientRect();
-        const before = (e.clientY - r.top) < r.height / 2;
-        row.classList.remove("drop-before", "drop-after");
-        const sourceId = +e.dataTransfer.getData("text/plain");
-        if (!sourceId || sourceId === t.id) return;
-        await reorderTabByDrop(sourceId, t.id, before);
-      });
-      const fav = document.createElement("img");
-      fav.className = "favicon";
-      fav.alt = "";
-      fav.referrerPolicy = "no-referrer";
-      fav.src = faviconUrlFor(t);
-      fav.addEventListener("error", () => { fav.src = fallbackFaviconUrl(t); });
-      const titleSpan = document.createElement("span");
-      titleSpan.className = "title";
-      titleSpan.textContent = t.title || t.url;
-      const hostSpan = document.createElement("span");
-      hostSpan.className = "host";
-      try { hostSpan.textContent = new URL(t.url).hostname.replace(/^www\./, ""); } catch {}
-      const closeTabBtn = document.createElement("button");
-      closeTabBtn.className = "t-btn";
-      closeTabBtn.title = "Close tab";
-      closeTabBtn.textContent = "×";
-      closeTabBtn.addEventListener("click", (e) => {
-        e.stopPropagation();
-        closeTabs([t.id]);
-      });
-      row.appendChild(fav);
-      row.appendChild(titleSpan);
-      row.appendChild(hostSpan);
-      row.appendChild(closeTabBtn);
-      row.addEventListener("click", () => browser.tabs.update(t.id, { active: true }));
-      div.appendChild(row);
-    }
-    main.appendChild(div);
+    main.appendChild(card);
+  }
+  const newTabs = state.tabs.filter((t) => !used.has(t.id)).sort((a, b) => a.index - b.index);
+  if (newTabs.length) {
+    const sep = document.createElement("div");
+    sep.className = "ungrouped-separator";
+    sep.title = "New tabs since last apply";
+    main.appendChild(sep);
+    const wrap = document.createElement("div");
+    wrap.className = "group ungrouped";
+    for (const t of newTabs) wrap.appendChild(createTabRow(t));
+    main.appendChild(wrap);
   }
 }
 
@@ -749,8 +1173,12 @@ async function bookmarkGroup(label, groupTabs) {
   }
 }
 
-async function closeTabs(ids) {
+async function closeTabs(ids, { label } = {}) {
   try {
+    const snapLabel = label || (ids.length === 1 ? "close-tab" : `close-${ids.length}-tabs`);
+    await captureUndoSnapshot(snapLabel, { closingTabIds: ids });
+    const captured = lastUndoSnapshot?.closedTabs?.length || 0;
+    status(`closing ${ids.length} tab(s); undo available (${captured} captured).`);
     await browser.tabs.remove(ids);
     if (state) {
       const remove = new Set(ids);
@@ -759,6 +1187,7 @@ async function closeTabs(ids) {
       const newEmbeddings = keep(state.embeddings);
       const newTexts = keep(state.texts);
       state = { tabs: newTabs, embeddings: newEmbeddings, texts: newTexts, lastGroups: null };
+      skipNextAutoApply = true;
       await recluster();
     }
   } catch (e) {
@@ -768,7 +1197,7 @@ async function closeTabs(ids) {
 }
 
 async function closeGroup(groupTabs) {
-  await closeTabs(groupTabs.map((t) => t.id));
+  await closeTabs(groupTabs.map((t) => t.id), { label: `close-group-${groupTabs.length}` });
 }
 
 log("sidebar.js loaded, calling initial refresh");

@@ -3,3 +3,5 @@
 web-ext-artifacts/
 logdata/
 viewer.py
+vendor/transformers/models/
+vendor/transformers/wasm/
