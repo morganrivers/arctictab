@@ -18,6 +18,31 @@
         <p class="hint">Pinned tabs are kept where they are and never join a group.</p>
       </section>
       <section>
+        <h2>Pinning</h2>
+        <label>
+          <input type="checkbox" id="usePinning" />
+          Use pinning feature
+        </label>
+        <p class="hint">Show pin buttons on tabs and groups. Pinned groups have a frozen name and a fixed set of member tabs; reclustering won't move pinned tabs out.</p>
+        <label>
+          <input type="checkbox" id="autoPinTabOnDrag" />
+          Pin tab to group when dragged across groups
+          <span id="autoPinTabHint" class="inline-hint"></span>
+        </label>
+        <label>
+          <input type="checkbox" id="autoPinGroupOnDrag" />
+          Pin destination group when a tab is dragged to it
+          <span id="autoPinGroupHint" class="inline-hint"></span>
+        </label>
+      </section>
+      <section>
+        <label>
+          <input type="checkbox" id="useBookmark" />
+          Use bookmark feature
+        </label>
+        <p class="hint">Show the bookmark ★ button on each group (bookmarks all tabs in a group to the Bookmarks Toolbar).</p>
+      </section>
+      <section>
         <label>
           <input type="checkbox" id="groupBySimilarity" />
           New tabs put at end of most similar group
@@ -57,6 +82,18 @@
         <label>
           <input type="checkbox" id="hideRearrange" />
           Hide "Re-organize tabs" button
+        </label>
+      </section>
+      <section>
+        <label>
+          <input type="checkbox" id="hideGroupCount" />
+          Hide group count
+        </label>
+      </section>
+      <section>
+        <label>
+          <input type="checkbox" id="hideTabCount" />
+          Hide tab count
         </label>
       </section>
       <section>

@@ -11,6 +11,14 @@
   white-space: pre-wrap;
 }
 .status-line.hidden { display: none; }
+.counts-line {
+  display: flex;
+  gap: 12px;
+  font-size: 12px;
+  opacity: 0.75;
+}
+.counts-line.hidden { display: none; }
+.count-item.hidden { display: none; }
 :root {
   --bg: #ffffff;
   --fg: #1b1b1f;
@@ -18,16 +26,18 @@
   --border: #d8d8de;
   --accent: #3b82f6;
   --accent-fg: #ffffff;
+  --active-bg: #e4ecfb;
+  --active-border: #3b82f6;
 }
-@media (prefers-color-scheme: dark) {
-  :root {
-    --bg: #1b1b1f;
-    --fg: #e8e8ea;
-    --muted: #2a2a30;
-    --border: #2a2a30;
-    --accent: #3b82f6;
-    --accent-fg: #ffffff;
-  }
+:root[data-theme="dark"] {
+  --bg: #1b1b1f;
+  --fg: #e8e8ea;
+  --muted: #2a2a30;
+  --border: #2a2a30;
+  --accent: #3b82f6;
+  --accent-fg: #ffffff;
+  --active-bg: #3a3a44;
+  --active-border: #6a6a78;
 }
 body {
   font: 13px system-ui, sans-serif;
@@ -70,6 +80,22 @@ button:disabled { opacity: 0.5; cursor: wait; }
 .opt { font-size: 12px; opacity: 0.85; }
 #opts-btn { margin-left: auto; font-size: 16px; }
 main { padding: 6px 0; }
+.top-drop-zone {
+  height: 6px;
+  margin: 0 6px 4px;
+  border-radius: 3px;
+  background: transparent;
+  border: 1px dashed transparent;
+  transition: background-color 0.1s, border-color 0.1s, height 0.1s;
+}
+body.tab-dragging .top-drop-zone {
+  height: 14px;
+  border-color: var(--border);
+}
+body.tab-dragging .top-drop-zone.over {
+  background: var(--accent);
+  border-color: var(--accent);
+}
 .group {
   border-top: 1px solid var(--border);
   padding: 6px 10px;
@@ -131,10 +157,10 @@ main { padding: 6px 0; }
 .tab.drop-before { box-shadow: inset 0 2px 0 0 var(--accent); }
 .tab.drop-after { box-shadow: inset 0 -2px 0 0 var(--accent); }
 .tab.active {
-  background: var(--bg);
-  box-shadow: 0 0 0 1px var(--border), 0 1px 3px rgba(0, 0, 0, 0.12);
+  background: var(--active-bg);
+  box-shadow: 0 0 0 1px var(--active-border), 0 1px 3px rgba(0, 0, 0, 0.12);
 }
-.tab.active:hover { background: var(--bg); }
+.tab.active:hover { background: var(--active-bg); }
 .tab .favicon {
   width: 14px;
   height: 14px;
@@ -161,3 +187,10 @@ main { padding: 6px 0; }
 }
 .tab:hover .t-btn { opacity: 0.5; }
 .t-btn:hover { opacity: 1 !important; background: var(--muted); }
+.t-btn.pin-btn.on,
+.g-btn.pin-btn.on { opacity: 1; }
+.tab .t-btn.pin-btn { font-size: 11px; }
+.g-btn.pin-btn { font-size: 12px; }
+.tab.pinned .pin-btn { opacity: 1; }
+.group.pinned > .group-header { background: var(--muted); border-radius: 3px; padding: 0 4px; }
+.group.pinned > .group-header h3 { opacity: 1; }

@@ -5,14 +5,12 @@
   --border: #d8d8de;
   --accent: #3b82f6;
 }
-@media (prefers-color-scheme: dark) {
-  :root {
-    --bg: #1b1b1f;
-    --fg: #e8e8ea;
-    --muted: #a4a4ad;
-    --border: #2a2a30;
-    --accent: #3b82f6;
-  }
+:root[data-theme="dark"] {
+  --bg: #1b1b1f;
+  --fg: #e8e8ea;
+  --muted: #a4a4ad;
+  --border: #2a2a30;
+  --accent: #3b82f6;
 }
 * { box-sizing: border-box; }
 body {
