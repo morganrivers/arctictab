@@ -149,6 +149,22 @@ test("planGroupSync never groups a non-contiguous cluster (no tab jumping)", () 
   assert.deepEqual(plan.group, [{ tabIds: [2, 3] }]);
 });
 
+test("planGroupSync groups members separated only by non-groupable tabs", () => {
+  // Strip: content(0), about:newtab(1), content(2), about:debugging(3), content(4).
+  // The three content tabs are one cluster; only junk tabs sit between them, so
+  // grouping shoves the junk aside without relocating a content tab.
+  const liveTabs = [
+    { id: 1, index: 0, groupId: -1, url: "https://a.example/" },
+    { id: 2, index: 1, groupId: -1, url: "about:newtab" },
+    { id: 3, index: 2, groupId: -1, url: "https://b.example/" },
+    { id: 4, index: 3, groupId: -1, url: "about:debugging" },
+    { id: 5, index: 4, groupId: -1, url: "https://c.example/" },
+  ];
+  const groups = [[tab(1, 0), tab(3, 2), tab(5, 4)]];
+  const plan = planGroupSync(liveTabs, groups);
+  assert.deepEqual(plan.group, [{ tabIds: [1, 3, 5] }]);
+});
+
 test("planGroupSync redraws contiguous group boundaries in place", () => {
   // Firefox: 1,2 loose; 3,4 in native group 7.
   const liveTabs = [
