@@ -16,6 +16,7 @@ const DEFAULTS = {
   hideRearrange: false,
   hideGroupCount: false,
   hideTabCount: false,
+  hideStatus: true,
   autoApplyGroups: false,
   autoApplyNaming: true,
   nameStyle: "mixed",
@@ -39,6 +40,7 @@ const hideApplyGroups = $("#hideApplyGroups");
 const hideRearrange = $("#hideRearrange");
 const hideGroupCount = $("#hideGroupCount");
 const hideTabCount = $("#hideTabCount");
+const hideStatus = $("#hideStatus");
 const autoApplyGroups = $("#autoApplyGroups");
 const autoApplyNaming = $("#autoApplyNaming");
 const autoApplyNamingHint = $("#autoApplyNamingDisabledHint");
@@ -117,6 +119,7 @@ async function load() {
   hideRearrange.checked = !!v.hideRearrange;
   hideGroupCount.checked = !!v.hideGroupCount;
   hideTabCount.checked = !!v.hideTabCount;
+  hideStatus.checked = !!v.hideStatus;
   autoApplyGroups.checked = !!v.autoApplyGroups;
   autoApplyNaming.checked = !!v.autoApplyNaming;
   usePinning.checked = !!v.usePinning;
@@ -139,6 +142,7 @@ async function save() {
       hideRearrange: hideRearrange.checked,
       hideGroupCount: hideGroupCount.checked,
       hideTabCount: hideTabCount.checked,
+      hideStatus: hideStatus.checked,
       autoApplyGroups: autoApplyGroups.checked,
       autoApplyNaming: autoApplyNaming.checked,
       usePinning: usePinning.checked,
@@ -168,6 +172,7 @@ hideApplyGroups.addEventListener("change", save);
 hideRearrange.addEventListener("change", save);
 hideGroupCount.addEventListener("change", save);
 hideTabCount.addEventListener("change", save);
+hideStatus.addEventListener("change", save);
 autoApplyGroups.addEventListener("change", onChangeRefresh);
 autoApplyNaming.addEventListener("change", onChangeRefresh);
 usePinning.addEventListener("change", onChangeRefresh);

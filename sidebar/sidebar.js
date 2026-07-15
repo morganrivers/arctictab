@@ -1,9 +1,9 @@
 import { buildText, embedBatch, getExtractor, onExtractorProgress } from "../lib/embed.js";
 import { getMany, put } from "../lib/cache.js";
-import { detectExcursions, detectExcursionsTargeted, clusterByEmbeddings, clusterByEmbeddingsTargeted, orderGroupsBySimilarity } from "../lib/cluster.js";
+import { detectExcursions, detectExcursionsTargeted, clusterByEmbeddings, clusterByEmbeddingsTargeted, orderGroupsBySimilarity, placeNewTab } from "../lib/cluster.js";
 import { nameGroups } from "../lib/names.js";
 import { initTheme } from "../lib/theme.js";
-import { isGroupable, orderGroupsForRender, orderTabIdsForStrip, staleGroupedTabIds } from "../lib/taborder.js";
+import { isGroupable, orderTabIdsForStrip, planGroupSync, mirrorLayout } from "../lib/taborder.js";
 
 initTheme();
 
@@ -14,6 +14,7 @@ const status = (m) => {
   console.log("[arctictab][status]", m);
   statusEl = statusEl || document.getElementById("status-line");
   if (!statusEl) return;
+  if (options?.hideStatus) { statusEl.classList.add("hidden"); return; }
   statusEl.textContent = m;
   statusEl.classList.remove("hidden");
   clearTimeout(statusHideTimer);
@@ -104,6 +105,7 @@ const OPTIONS_DEFAULTS = {
   hideRearrange: false,
   hideGroupCount: false,
   hideTabCount: false,
+  hideStatus: true,
   autoApplyGroups: false,
   autoApplyNaming: true,
   nameStyle: "mixed",
@@ -291,6 +293,10 @@ function applyButtonVisibility() {
   const autoSyncing = effectiveAutoApplyNaming();
   applyBtn.classList.toggle("hidden", !!options.hideApplyGroups || autoSyncing);
   rearrangeBtn.classList.toggle("hidden", !!options.hideRearrange);
+  if (options.hideStatus) {
+    statusEl = statusEl || document.getElementById("status-line");
+    if (statusEl) statusEl.classList.add("hidden");
+  }
   updateCountsDisplay();
 }
 
@@ -509,31 +515,75 @@ function scheduleRecluster() {
   }, 80);
 }
 
+// Similarity mode, mirror-safe: route one loose (singleton) tab into the tail of
+// its most-similar multi-tab group. Only the loose tab moves, so existing tabs
+// stay put and the strip stays a set of contiguous blocks. Returns true if it
+// moved a tab (caller reschedules so the linear pass regroups it).
+async function placeNewTabsBySimilarity(groups) {
+  const multi = groups.filter((g) => g.length >= 2);
+  if (!multi.length) return false;
+  const embByTabId = new Map(state.tabs.map((t, i) => [t.id, state.embeddings[i]]));
+  for (const g of groups) {
+    if (g.length !== 1) continue;
+    const t = g[0];
+    const emb = embByTabId.get(t.id);
+    if (!emb) continue;
+    const res = placeNewTab(emb, multi, embByTabId);
+    if (!res) continue;
+    let target = res.targetIndex;
+    if (t.index < target) target -= 1;
+    if (target === t.index) continue;
+    log(`similarity-place: tab ${t.id} (idx ${t.index}) → idx ${target} (sim ${res.similarity.toFixed(3)})`);
+    suppressMovesFor(500);
+    try { await browser.tabs.move(t.id, { index: target }); }
+    catch (e) { log(`similarity-place: move failed: ${e?.message || e}`); continue; }
+    return true;
+  }
+  return false;
+}
+
 async function recluster({ forceSimilarity = false } = {}) {
   console.assert(state != null, "state must exist");
   const { tabs, embeddings, texts } = state;
+  const clusterTabs = [];
+  const clusterEmbeddings = [];
+  for (let i = 0; i < tabs.length; i++) {
+    if (isGroupable(tabs[i])) { clusterTabs.push(tabs[i]); clusterEmbeddings.push(embeddings[i]); }
+  }
+  console.assert(clusterTabs.length === clusterEmbeddings.length, "cluster tabs/embeddings length mismatch");
   let groups, threshold, avg, iterations, statusMsg;
-  const useSimilarity = forceSimilarity || options.groupBySimilarity;
+  // Only the explicit Re-organize action (forceSimilarity) may reshuffle existing
+  // tabs by content. The auto path always stays linear/contiguous so the strip
+  // mirror holds; similarity mode instead routes new tabs (below) into groups.
+  const useSimilarity = forceSimilarity;
   const mode = useSimilarity ? "agglomerative" : "linear";
-  if (controlChk.checked) {
+  if (clusterTabs.length === 0) {
+    groups = [];
+    threshold = 0; avg = 0; iterations = 0;
+    statusMsg = "no groupable tabs";
+  } else if (controlChk.checked) {
     const target = windowFromSlider();
     const sizePenalty = penaltyFromSlider();
     const smallSizePenalty = smallPenaltyFromSlider();
-    log(`recluster (${mode}): ${tabs.length} tabs, target=${target}, penalty=${sizePenalty.toFixed(2)}, smallPenalty=${smallSizePenalty.toFixed(2)}`);
+    log(`recluster (${mode}): ${clusterTabs.length} groupable tabs, target=${target}, penalty=${sizePenalty.toFixed(2)}, smallPenalty=${smallSizePenalty.toFixed(2)}`);
     const targetedFn = useSimilarity ? clusterByEmbeddingsTargeted : detectExcursionsTargeted;
-    ({ groups, threshold, avg, iterations } = targetedFn(tabs, embeddings, { targetAvgSize: target, sizePenalty, smallSizePenalty }));
+    ({ groups, threshold, avg, iterations } = targetedFn(clusterTabs, clusterEmbeddings, { targetAvgSize: target, sizePenalty, smallSizePenalty }));
     statusMsg = `${groups.length} groups, avg ${avg.toFixed(1)} (${mode}, target ${target}, thr ${threshold.toFixed(2)}, ${iterations} iter)`;
   } else {
-    const desired = Math.max(1, Math.round(computeAutoGroupCount(tabs.length, options.autoGroupAnchors)));
-    const target = Math.max(1, tabs.length / desired);
+    const desired = Math.max(1, Math.round(computeAutoGroupCount(clusterTabs.length, options.autoGroupAnchors)));
+    const target = Math.max(1, clusterTabs.length / desired);
     const sizePenalty = penaltyFromSlider();
     const smallSizePenalty = smallPenaltyFromSlider();
-    log(`recluster (${mode}, auto): ${tabs.length} tabs → ${desired} groups, target=${target.toFixed(2)}, penalty=${sizePenalty.toFixed(2)}, smallPenalty=${smallSizePenalty.toFixed(2)}`);
+    log(`recluster (${mode}, auto): ${clusterTabs.length} groupable tabs → ${desired} groups, target=${target.toFixed(2)}, penalty=${sizePenalty.toFixed(2)}, smallPenalty=${smallSizePenalty.toFixed(2)}`);
     const targetedFn = useSimilarity ? clusterByEmbeddingsTargeted : detectExcursionsTargeted;
-    ({ groups, threshold, avg, iterations } = targetedFn(tabs, embeddings, { targetAvgSize: target, sizePenalty, smallSizePenalty }));
+    ({ groups, threshold, avg, iterations } = targetedFn(clusterTabs, clusterEmbeddings, { targetAvgSize: target, sizePenalty, smallSizePenalty }));
     statusMsg = `${groups.length} groups, avg ${avg.toFixed(1)} (${mode}, auto target ${target.toFixed(1)} for ${desired})`;
   }
   groups = postProcessPins(groups, tabs);
+  if (options.groupBySimilarity && !forceSimilarity && state?.embeddings) {
+    const moved = await placeNewTabsBySimilarity(groups);
+    if (moved) { scheduleRefresh("similarity-place"); return; }
+  }
   state.lastGroups = groups;
   state.clusterResult = { threshold, avg, iterations };
   log(`recluster result: ${groups.length} groups (${clusterPinId.size} pinned), avg ${avg.toFixed(1)}, thr ${threshold.toFixed(2)}`);
@@ -1193,19 +1243,18 @@ async function applyTabGroups(groups, { rearrange = true, captureUndo = true, sk
     }
   }
 
-  const staleGroupedIds = staleGroupedTabIds(tabsNow, groups, skipTabIds);
-  if (staleGroupedIds.length) {
-    log(`apply-groups: ungrouping ${staleGroupedIds.length} tabs no longer in a group`);
-    await ungroupAll(staleGroupedIds);
+  const plan = planGroupSync(tabsNow, groups, { skipIds: skipTabIds });
+  if (plan.ungroup.length) {
+    log(`apply-groups: ungrouping ${plan.ungroup.length} tabs no longer in a contiguous group`);
+    await ungroupAll(plan.ungroup);
   }
 
+  const groupByTabId = new Map();
+  for (const g of groups) for (const t of g) groupByTabId.set(t.id, g);
+
   let grouped = 0;
-  for (const g of groups) {
-    let groupable = g.filter(isGroupable);
-    if (skipTabIds) groupable = groupable.filter((t) => !skipTabIds.has(t.id));
-    if (groupable.length < 2) continue;
-    const label = labelFor(g);
-    const ids = groupable.map((t) => t.id);
+  for (const { tabIds: ids } of plan.group) {
+    const label = labelFor(groupByTabId.get(ids[0]));
 
     const currentGids = ids.map((id) => tabById.get(id)?.groupId ?? -1);
     const uniqueGids = [...new Set(currentGids)];
@@ -1439,19 +1488,48 @@ async function moveTabToStart(sourceId) {
   }
 }
 
+function renderUngroupedTabs(main, usedIds) {
+  const leftover = state.tabs.filter((t) => !usedIds.has(t.id)).sort((a, b) => a.index - b.index);
+  if (!leftover.length) return;
+  const sep = document.createElement("div");
+  sep.className = "ungrouped-separator";
+  sep.title = "Ungrouped tabs (not placed in any Firefox group)";
+  main.appendChild(sep);
+  const wrap = document.createElement("div");
+  wrap.className = "group ungrouped";
+  for (const t of leftover) wrap.appendChild(createTabRow(t, null));
+  main.appendChild(wrap);
+}
+
 function renderLiveView(main, groups) {
-  const ordered = orderGroupsForRender(groups, { groupBySimilarity: options.groupBySimilarity });
-  for (const g of ordered) {
+  const tabById = new Map(state.tabs.map((t) => [t.id, t]));
+  const groupByTabId = new Map();
+  for (const g of groups) for (const t of g) groupByTabId.set(t.id, g);
+  const items = mirrorLayout(state.tabs, groups, { skipIds: manuallyPlaced });
+  let looseWrap = null;
+  for (const item of items) {
+    if (item.type === "loose") {
+      if (!looseWrap) {
+        looseWrap = document.createElement("div");
+        looseWrap.className = "group ungrouped";
+        main.appendChild(looseWrap);
+      }
+      looseWrap.appendChild(createTabRow(tabById.get(item.tabId), null));
+      continue;
+    }
+    looseWrap = null;
+    const g = groupByTabId.get(item.tabIds[0]);
+    const tabs = item.tabIds.map((id) => tabById.get(id));
     const key = groupKey(g);
     const pid = clusterPinId.get(key);
-    const card = createGroupCard(g, {
+    const card = createGroupCard(tabs, {
       label: labelFor(g),
       getCurrentLabel: () => labelFor(g),
       onRename: (newLabel) => {
         if (pid != null) renamePinnedGroup(pid, newLabel);
         else customLabels.set(key, newLabel);
       },
-      onBookmark: (label) => bookmarkGroup(label, g),
+      onBookmark: (label) => bookmarkGroup(label, tabs),
       onClose: () => closeGroup(g),
       pinId: pid ?? null,
       onTogglePin: () => toggleGroupPin(g, pid),
@@ -1490,17 +1568,7 @@ function renderFrozenView(main) {
     });
     main.appendChild(card);
   }
-  const newTabs = state.tabs.filter((t) => !used.has(t.id)).sort((a, b) => a.index - b.index);
-  if (newTabs.length) {
-    const sep = document.createElement("div");
-    sep.className = "ungrouped-separator";
-    sep.title = "New tabs since last apply";
-    main.appendChild(sep);
-    const wrap = document.createElement("div");
-    wrap.className = "group ungrouped";
-    for (const t of newTabs) wrap.appendChild(createTabRow(t, null));
-    main.appendChild(wrap);
-  }
+  renderUngroupedTabs(main, used);
 }
 
 const TRANSPARENT_PX = "data:image/svg+xml;utf8,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%2014%2014%22%3E%3Crect%20width%3D%2214%22%20height%3D%2214%22%20rx%3D%223%22%20fill%3D%22%23999%22%20opacity%3D%220.25%22%2F%3E%3C%2Fsvg%3E";

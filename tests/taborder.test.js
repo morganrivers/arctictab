@@ -7,6 +7,8 @@ import {
   orderTabIdsForStrip,
   desiredGroupedIds,
   staleGroupedTabIds,
+  planGroupSync,
+  mirrorLayout,
 } from "../lib/taborder.js";
 
 function tab(id, index, url = `https://site${id}.example/`) {
@@ -127,6 +129,101 @@ test("tabs already in the correct group are not ungrouped", () => {
   ];
   const groups = [[tab(1, 0), tab(2, 1)]];
   assert.deepEqual(staleGroupedTabIds(liveTabs, groups), []);
+});
+
+test("planGroupSync never groups a non-contiguous cluster (no tab jumping)", () => {
+  // Firefox strip order: 1,2,3,4 all loose.
+  const liveTabs = [
+    { id: 1, index: 0, groupId: -1 },
+    { id: 2, index: 1, groupId: -1 },
+    { id: 3, index: 2, groupId: -1 },
+    { id: 4, index: 3, groupId: -1 },
+  ];
+  // Reclustering wants 1 & 4 together, but they are not adjacent in the strip.
+  // Grouping them would force Firefox to relocate a tab, so it must be skipped.
+  const groups = [
+    [tab(1, 0), tab(4, 3)],
+    [tab(2, 1), tab(3, 2)],
+  ];
+  const plan = planGroupSync(liveTabs, groups);
+  assert.deepEqual(plan.group, [{ tabIds: [2, 3] }]);
+});
+
+test("planGroupSync redraws contiguous group boundaries in place", () => {
+  // Firefox: 1,2 loose; 3,4 in native group 7.
+  const liveTabs = [
+    { id: 1, index: 0, groupId: -1 },
+    { id: 2, index: 1, groupId: -1 },
+    { id: 3, index: 2, groupId: 7 },
+    { id: 4, index: 3, groupId: 7 },
+  ];
+  // Recluster shifts the boundary right: 1,2,3 together; 4 becomes a singleton.
+  // 1,2,3 are contiguous so they group in place; 4 leaves its group.
+  const groups = [
+    [tab(1, 0), tab(2, 1), tab(3, 2)],
+    [tab(4, 3)],
+  ];
+  const plan = planGroupSync(liveTabs, groups);
+  assert.deepEqual(plan.group, [{ tabIds: [1, 2, 3] }]);
+  assert.deepEqual(plan.ungroup, [4]);
+});
+
+test("mirrorLayout interleaves loose tabs between group cards in strip order", () => {
+  // Firefox strip: 1(loose), [2,3](group), 4(loose), [5,6](group).
+  const liveTabs = [
+    { id: 1, index: 0, groupId: -1 },
+    { id: 2, index: 1, groupId: 7 },
+    { id: 3, index: 2, groupId: 7 },
+    { id: 4, index: 3, groupId: -1 },
+    { id: 5, index: 4, groupId: 8 },
+    { id: 6, index: 5, groupId: 8 },
+  ];
+  const groups = [
+    [tab(1, 0)],
+    [tab(2, 1), tab(3, 2)],
+    [tab(4, 3)],
+    [tab(5, 4), tab(6, 5)],
+  ];
+  const layout = mirrorLayout(liveTabs, groups).map((it) =>
+    it.type === "group" ? { type: "group", tabIds: it.tabIds } : { type: "loose", tabId: it.tabId },
+  );
+  assert.deepEqual(layout, [
+    { type: "loose", tabId: 1 },
+    { type: "group", tabIds: [2, 3] },
+    { type: "loose", tabId: 4 },
+    { type: "group", tabIds: [5, 6] },
+  ]);
+});
+
+test("mirrorLayout shows a singleton cluster as a loose tab, not a group card", () => {
+  const liveTabs = [
+    { id: 1, index: 0, groupId: -1 },
+    { id: 2, index: 1, groupId: -1 },
+    { id: 3, index: 2, groupId: -1 },
+  ];
+  const groups = [
+    [tab(1, 0), tab(2, 1)],
+    [tab(3, 2)],
+  ];
+  const layout = mirrorLayout(liveTabs, groups);
+  assert.deepEqual(layout.map((it) => it.type), ["group", "loose"]);
+  assert.deepEqual(layout[0].tabIds, [1, 2]);
+  assert.equal(layout[1].tabId, 3);
+});
+
+test("planGroupSync leaves manually placed tabs untouched", () => {
+  const liveTabs = [
+    { id: 1, index: 0, groupId: 7 },
+    { id: 2, index: 1, groupId: 7 },
+    { id: 3, index: 5, groupId: 7 },
+  ];
+  const groups = [
+    [tab(1, 0), tab(2, 1)],
+    [tab(3, 5)],
+  ];
+  const plan = planGroupSync(liveTabs, groups, { skipIds: new Set([3]) });
+  assert.deepEqual(plan.group, [{ tabIds: [1, 2] }]);
+  assert.deepEqual(plan.ungroup, []);
 });
 
 test("isGroupable excludes about/chrome/moz-extension urls", () => {
