@@ -1244,46 +1244,55 @@ async function applyTabGroups(groups, { rearrange = true, captureUndo = true, sk
   }
 
   const plan = planGroupSync(tabsNow, groups, { skipIds: skipTabIds });
-  if (plan.ungroup.length) {
-    log(`apply-groups: ungrouping ${plan.ungroup.length} tabs no longer in a contiguous group`);
-    await ungroupAll(plan.ungroup);
-  }
 
   const groupByTabId = new Map();
   for (const g of groups) for (const t of g) groupByTabId.set(t.id, g);
 
   let grouped = 0;
-  for (const { tabIds: ids } of plan.group) {
-    const label = labelFor(groupByTabId.get(ids[0]));
-
-    const currentGids = ids.map((id) => tabById.get(id)?.groupId ?? -1);
-    const uniqueGids = [...new Set(currentGids)];
-    const sharedGid = (uniqueGids.length === 1 && uniqueGids[0] !== -1) ? uniqueGids[0] : null;
-    const existingMembers = sharedGid != null ? membersByGid.get(sharedGid) : null;
-    const noExtras = !!existingMembers && existingMembers.size === ids.length;
-    const titleMatches = sharedGid != null && titleByGid.get(sharedGid) === label;
-
-    if (sharedGid != null && noExtras && titleMatches) {
-      log(`apply-groups: "${label}" already correct, skipping`);
-      grouped++;
-      continue;
+  // ungroup/group relocate tabs to make each cluster a contiguous native group.
+  // Suppress the resulting move events so they aren't recorded as manual
+  // placements, which would mark content tabs manuallyPlaced and split the very
+  // groups we just formed on the next recompute.
+  suppressMoveRefresh++;
+  try {
+    if (plan.ungroup.length) {
+      log(`apply-groups: ungrouping ${plan.ungroup.length} tabs no longer in a contiguous group`);
+      await ungroupAll(plan.ungroup);
     }
-    if (sharedGid != null && noExtras && !titleMatches) {
-      try {
-        await browser.tabGroups.update(sharedGid, { title: label });
-        log(`apply-groups: "${label}" title-only update`);
+    for (const { tabIds: ids } of plan.group) {
+      const label = labelFor(groupByTabId.get(ids[0]));
+
+      const currentGids = ids.map((id) => tabById.get(id)?.groupId ?? -1);
+      const uniqueGids = [...new Set(currentGids)];
+      const sharedGid = (uniqueGids.length === 1 && uniqueGids[0] !== -1) ? uniqueGids[0] : null;
+      const existingMembers = sharedGid != null ? membersByGid.get(sharedGid) : null;
+      const noExtras = !!existingMembers && existingMembers.size === ids.length;
+      const titleMatches = sharedGid != null && titleByGid.get(sharedGid) === label;
+
+      if (sharedGid != null && noExtras && titleMatches) {
+        log(`apply-groups: "${label}" already correct, skipping`);
         grouped++;
-      } catch (e) { console.warn("tab group title update failed for", label, e); }
-      continue;
-    }
+        continue;
+      }
+      if (sharedGid != null && noExtras && !titleMatches) {
+        try {
+          await browser.tabGroups.update(sharedGid, { title: label });
+          log(`apply-groups: "${label}" title-only update`);
+          grouped++;
+        } catch (e) { console.warn("tab group title update failed for", label, e); }
+        continue;
+      }
 
-    try {
-      const gid = await browser.tabs.group({ tabIds: ids });
-      await browser.tabGroups.update(gid, { title: label });
-      grouped++;
-    } catch (e) {
-      console.warn("tab grouping failed for", label, e);
+      try {
+        const gid = await browser.tabs.group({ tabIds: ids });
+        await browser.tabGroups.update(gid, { title: label });
+        grouped++;
+      } catch (e) {
+        console.warn("tab grouping failed for", label, e);
+      }
     }
+  } finally {
+    setTimeout(() => { suppressMoveRefresh--; }, 500);
   }
   return { moved, total, grouped };
 }
