@@ -42,6 +42,9 @@ input[type="checkbox"] { accent-color: var(--accent); }
 .inline-hint.show { display: inline; }
 label.disabled { opacity: 0.55; cursor: not-allowed; }
 label.disabled input { cursor: not-allowed; }
+.row-btns { display: flex; gap: 8px; margin-top: 8px; }
+.row-btns button { font: inherit; padding: 5px 10px; border: 1px solid var(--border); border-radius: 4px; background: var(--accent); color: #fff; cursor: pointer; }
+input[type="text"] { font: inherit; padding: 4px 6px; border: 1px solid var(--border); border-radius: 4px; background: var(--bg); color: var(--fg); min-width: 12em; }
 label.anchor-row { display: flex; gap: 6px; align-items: center; margin-top: 6px; }
 label.anchor-row input[type="number"] { width: 5em; padding: 2px 4px; font: inherit; }
 details summary { cursor: pointer; user-select: none; }

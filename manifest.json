@@ -24,6 +24,14 @@
     "scripts": ["background.js"],
     "type": "module"
   },
+  "commands": {
+    "search-tabs": {
+      "suggested_key": {
+        "default": "Ctrl+Shift+F"
+      },
+      "description": "Search open tabs"
+    }
+  },
   "sidebar_action": {
     "default_title": "arctictab",
     "default_panel": "sidebar/sidebar.html",

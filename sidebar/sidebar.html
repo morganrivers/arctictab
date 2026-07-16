@@ -6,6 +6,11 @@
   </head>
   <body>
     <header>
+      <div id="search-box" class="search-box hidden">
+        <input id="search-input" type="text" placeholder="Search tabs" autocomplete="off" spellcheck="false" />
+        <button id="search-clear" class="search-clear hidden" title="Clear search">×</button>
+        <ul id="search-results" class="search-results hidden" role="listbox"></ul>
+      </div>
       <div id="counts-line" class="counts-line hidden">
         <span id="group-count" class="count-item hidden"></span>
         <span id="tab-count" class="count-item hidden"></span>

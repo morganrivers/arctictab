@@ -1,4 +1,5 @@
 *.md
+node_modules/
 .amo-upload-uuid
 web-ext-artifacts/
 logdata/

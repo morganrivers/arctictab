@@ -3,7 +3,8 @@ import { getMany, put } from "../lib/cache.js";
 import { detectExcursions, detectExcursionsTargeted, clusterByEmbeddings, clusterByEmbeddingsTargeted, orderGroupsBySimilarity, placeNewTab } from "../lib/cluster.js";
 import { nameGroups } from "../lib/names.js";
 import { initTheme } from "../lib/theme.js";
-import { isGroupable, orderTabIdsForStrip, planGroupSync, mirrorLayout } from "../lib/taborder.js";
+import { orderTabIdsForStrip, planGroupSync, mirrorLayout } from "../lib/taborder.js";
+import { buildBm25, rankTabs } from "../lib/search.js";
 
 initTheme();
 
@@ -114,6 +115,10 @@ const OPTIONS_DEFAULTS = {
   useBookmark: false,
   autoPinTabOnDrag: true,
   autoPinGroupOnDrag: true,
+  showSearchBar: true,
+  hideTabTitle: false,
+  hideTabHost: false,
+  hideControlGroupSize: false,
 };
 
 const PINS_KEY = "arctictab:pins";
@@ -303,6 +308,20 @@ function applyButtonVisibility() {
   updateCountsDisplay();
 }
 
+function applyDisplayOptions() {
+  document.body.classList.toggle("hide-tab-title", !!options.hideTabTitle);
+  document.body.classList.toggle("hide-tab-host", !!options.hideTabHost);
+  const controlRow = controlChk.closest(".row");
+  if (controlRow) controlRow.classList.toggle("hidden", !!options.hideControlGroupSize);
+  if (options.hideControlGroupSize && controlChk.checked) {
+    controlChk.checked = false;
+    applyControlVisibility();
+    saveSettings();
+  }
+  const box = document.getElementById("search-box");
+  if (box) box.classList.toggle("hidden", !options.showSearchBar);
+}
+
 function updateCountsDisplay() {
   const line = document.getElementById("counts-line");
   const groupEl = document.getElementById("group-count");
@@ -323,12 +342,14 @@ async function loadOptions() {
   options = { ...OPTIONS_DEFAULTS, ...(r[OPTIONS_KEY] || {}) };
   log("options loaded", options);
   applyButtonVisibility();
+  applyDisplayOptions();
 }
 browser.storage.onChanged.addListener((changes, area) => {
   if (area !== "local" || !changes[OPTIONS_KEY]) return;
   options = { ...OPTIONS_DEFAULTS, ...(changes[OPTIONS_KEY].newValue || {}) };
   log("options updated", options);
   applyButtonVisibility();
+  applyDisplayOptions();
   resetRefreshFingerprints();
   scheduleRefresh("options-changed");
 });
@@ -546,11 +567,8 @@ async function placeNewTabsBySimilarity(groups) {
 async function recluster({ forceSimilarity = false } = {}) {
   console.assert(state != null, "state must exist");
   const { tabs, embeddings, texts } = state;
-  const clusterTabs = [];
-  const clusterEmbeddings = [];
-  for (let i = 0; i < tabs.length; i++) {
-    if (isGroupable(tabs[i])) { clusterTabs.push(tabs[i]); clusterEmbeddings.push(embeddings[i]); }
-  }
+  const clusterTabs = tabs;
+  const clusterEmbeddings = embeddings;
   console.assert(clusterTabs.length === clusterEmbeddings.length, "cluster tabs/embeddings length mismatch");
   let groups, threshold, avg, iterations, statusMsg;
   // Only the explicit Re-organize action (forceSimilarity) may reshuffle existing
@@ -561,12 +579,12 @@ async function recluster({ forceSimilarity = false } = {}) {
   if (clusterTabs.length === 0) {
     groups = [];
     threshold = 0; avg = 0; iterations = 0;
-    statusMsg = "no groupable tabs";
+    statusMsg = "no tabs";
   } else if (controlChk.checked) {
     const target = windowFromSlider();
     const sizePenalty = penaltyFromSlider();
     const smallSizePenalty = smallPenaltyFromSlider();
-    log(`recluster (${mode}): ${clusterTabs.length} groupable tabs, target=${target}, penalty=${sizePenalty.toFixed(2)}, smallPenalty=${smallSizePenalty.toFixed(2)}`);
+    log(`recluster (${mode}): ${clusterTabs.length} tabs, target=${target}, penalty=${sizePenalty.toFixed(2)}, smallPenalty=${smallSizePenalty.toFixed(2)}`);
     const targetedFn = useSimilarity ? clusterByEmbeddingsTargeted : detectExcursionsTargeted;
     ({ groups, threshold, avg, iterations } = targetedFn(clusterTabs, clusterEmbeddings, { targetAvgSize: target, sizePenalty, smallSizePenalty }));
     statusMsg = `${groups.length} groups, avg ${avg.toFixed(1)} (${mode}, target ${target}, thr ${threshold.toFixed(2)}, ${iterations} iter)`;
@@ -575,7 +593,7 @@ async function recluster({ forceSimilarity = false } = {}) {
     const target = Math.max(1, clusterTabs.length / desired);
     const sizePenalty = penaltyFromSlider();
     const smallSizePenalty = smallPenaltyFromSlider();
-    log(`recluster (${mode}, auto): ${clusterTabs.length} groupable tabs → ${desired} groups, target=${target.toFixed(2)}, penalty=${sizePenalty.toFixed(2)}, smallPenalty=${smallSizePenalty.toFixed(2)}`);
+    log(`recluster (${mode}, auto): ${clusterTabs.length} tabs → ${desired} groups, target=${target.toFixed(2)}, penalty=${sizePenalty.toFixed(2)}, smallPenalty=${smallSizePenalty.toFixed(2)}`);
     const targetedFn = useSimilarity ? clusterByEmbeddingsTargeted : detectExcursionsTargeted;
     ({ groups, threshold, avg, iterations } = targetedFn(clusterTabs, clusterEmbeddings, { targetAvgSize: target, sizePenalty, smallSizePenalty }));
     statusMsg = `${groups.length} groups, avg ${avg.toFixed(1)} (${mode}, auto target ${target.toFixed(1)} for ${desired})`;
@@ -1181,7 +1199,7 @@ async function snapshotTabOrder(label, ids) {
 }
 
 async function rearrangeTabs(groups) {
-  const ordered = orderTabIdsForStrip(groups, { groupBySimilarity: options.groupBySimilarity });
+  const ordered = orderTabIdsForStrip(groups);
   log(`rearrange: ${ordered.length} tabs target cluster order`);
 
   const currentTabs = await browser.tabs.query({ currentWindow: true });
@@ -1650,6 +1668,181 @@ async function closeTabs(ids, { label } = {}) {
 async function closeGroup(groupTabs) {
   await closeTabs(groupTabs.map((t) => t.id), { label: `close-group-${groupTabs.length}` });
 }
+
+const searchBox = document.getElementById("search-box");
+const searchInput = document.getElementById("search-input");
+const searchClear = document.getElementById("search-clear");
+const searchResults = document.getElementById("search-results");
+let searchDocs = [];
+let searchBm25 = null;
+let searchSeq = 0;
+let searchEmbedTimer = null;
+let searchSelIdx = -1;
+let searchCurrent = [];
+
+async function refreshSearchPlaceholder() {
+  let shortcut = "";
+  try {
+    const cmds = await browser.commands.getAll();
+    shortcut = cmds.find((c) => c.name === "search-tabs")?.shortcut || "";
+  } catch (e) {
+    console.warn("[arctictab] read shortcut failed", e);
+  }
+  searchInput.placeholder = shortcut ? `Search tabs (${shortcut})` : "Search tabs";
+}
+refreshSearchPlaceholder();
+document.addEventListener("visibilitychange", () => {
+  if (!document.hidden) refreshSearchPlaceholder();
+});
+
+async function rebuildSearchDocs() {
+  const tabs = await browser.tabs.query({ currentWindow: true });
+  const st = state?.tabs || [];
+  const idIdx = new Map(st.map((t, i) => [t.id, i]));
+  searchDocs = tabs.map((t) => {
+    const si = idIdx.get(t.id);
+    return {
+      tab: t,
+      text: si != null ? state.texts[si] : buildText(t, null),
+      embedding: si != null ? state.embeddings[si] : null,
+    };
+  });
+  searchBm25 = buildBm25(searchDocs.map((d) => d.text));
+}
+
+function hideSearchResults() {
+  searchResults.classList.add("hidden");
+  searchResults.innerHTML = "";
+  searchCurrent = [];
+  searchSelIdx = -1;
+}
+
+function renderSearchResults(items) {
+  searchCurrent = items;
+  searchSelIdx = items.length ? 0 : -1;
+  searchResults.innerHTML = "";
+  if (!items.length) {
+    const empty = document.createElement("li");
+    empty.className = "search-empty";
+    empty.textContent = "No matching tabs";
+    searchResults.appendChild(empty);
+    searchResults.classList.remove("hidden");
+    return;
+  }
+  items.forEach((tab, i) => {
+    const li = document.createElement("li");
+    li.className = "search-result" + (i === searchSelIdx ? " selected" : "");
+    li.setAttribute("role", "option");
+    const fav = document.createElement("img");
+    fav.className = "favicon";
+    fav.alt = "";
+    fav.referrerPolicy = "no-referrer";
+    fav.addEventListener("error", () => {
+      const fb = fallbackFaviconUrl(tab);
+      fav.src = fb !== fav.src ? fb : TRANSPARENT_PX;
+    });
+    fav.src = faviconUrlFor(tab);
+    const title = document.createElement("span");
+    title.className = "sr-title";
+    title.textContent = tab.title || tab.url;
+    const host = document.createElement("span");
+    host.className = "sr-host";
+    try { host.textContent = new URL(tab.url).hostname.replace(/^www\./, ""); } catch {}
+    li.appendChild(fav);
+    li.appendChild(title);
+    li.appendChild(host);
+    li.addEventListener("mousedown", (e) => { e.preventDefault(); activateSearchTab(tab); });
+    searchResults.appendChild(li);
+  });
+  searchResults.classList.remove("hidden");
+}
+
+function computeAndRenderSearch(query, queryEmbedding, allowEmpty = true) {
+  if (!searchBm25) return;
+  const ranked = rankTabs({
+    bm25Index: searchBm25,
+    embeddings: searchDocs.map((d) => d.embedding),
+    query,
+    queryEmbedding,
+    limit: 12,
+  });
+  if (!ranked.length && !allowEmpty) return;
+  renderSearchResults(ranked.map((r) => searchDocs[r.index].tab));
+}
+
+async function runSearch(q) {
+  const seq = ++searchSeq;
+  if (q.length < 2) { computeAndRenderSearch(q, null); return; }
+  let embedded = false;
+  const fallback = setTimeout(() => {
+    if (!embedded && seq === searchSeq) computeAndRenderSearch(q, null, false);
+  }, 180);
+  try {
+    const [emb] = await embedBatch([q]);
+    embedded = true;
+    clearTimeout(fallback);
+    if (seq === searchSeq) computeAndRenderSearch(q, emb);
+  } catch (e) {
+    embedded = true;
+    clearTimeout(fallback);
+    console.warn("[arctictab] search embed failed", e);
+    if (seq === searchSeq) computeAndRenderSearch(q, null);
+  }
+}
+
+function updateSearchSelection(delta) {
+  if (!searchCurrent.length) return;
+  searchSelIdx = (searchSelIdx + delta + searchCurrent.length) % searchCurrent.length;
+  const nodes = searchResults.querySelectorAll(".search-result");
+  nodes.forEach((n, i) => n.classList.toggle("selected", i === searchSelIdx));
+  nodes[searchSelIdx]?.scrollIntoView({ block: "nearest" });
+}
+
+async function activateSearchTab(tab) {
+  try {
+    await browser.tabs.update(tab.id, { active: true });
+    if (tab.windowId != null) browser.windows.update(tab.windowId, { focused: true }).catch(() => {});
+  } catch (e) {
+    console.warn("[arctictab] search activate failed", e);
+  }
+  closeSearch();
+}
+
+function closeSearch() {
+  searchInput.value = "";
+  searchClear.classList.add("hidden");
+  hideSearchResults();
+}
+
+function showAllTabs() {
+  renderSearchResults(searchDocs.map((d) => d.tab));
+}
+
+searchInput.addEventListener("focus", async () => {
+  try {
+    await rebuildSearchDocs();
+    if (!searchInput.value.trim()) showAllTabs();
+  } catch (e) {
+    console.warn("[arctictab] search index failed", e);
+  }
+});
+searchInput.addEventListener("input", () => {
+  const q = searchInput.value.trim();
+  searchClear.classList.toggle("hidden", !q);
+  clearTimeout(searchEmbedTimer);
+  if (!q) { searchSeq++; showAllTabs(); return; }
+  searchEmbedTimer = setTimeout(() => runSearch(q), 130);
+});
+searchInput.addEventListener("keydown", (e) => {
+  if (e.key === "ArrowDown") { e.preventDefault(); updateSearchSelection(1); }
+  else if (e.key === "ArrowUp") { e.preventDefault(); updateSearchSelection(-1); }
+  else if (e.key === "Enter") { e.preventDefault(); if (searchSelIdx >= 0) activateSearchTab(searchCurrent[searchSelIdx]); }
+  else if (e.key === "Escape") { e.preventDefault(); closeSearch(); }
+});
+searchClear.addEventListener("click", () => { closeSearch(); searchInput.focus(); });
+document.addEventListener("mousedown", (e) => {
+  if (!searchBox.contains(e.target)) hideSearchResults();
+}, true);
 
 log("sidebar.js loaded, calling initial refresh");
 refreshing = true;

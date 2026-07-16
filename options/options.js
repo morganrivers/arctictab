@@ -28,6 +28,10 @@ const DEFAULTS = {
   useBookmark: false,
   autoPinTabOnDrag: true,
   autoPinGroupOnDrag: true,
+  showSearchBar: true,
+  hideTabTitle: false,
+  hideTabHost: false,
+  hideControlGroupSize: false,
 };
 const SLIDERS = ["headSim", "curatedSim", "keywordFrac"];
 const ANCHOR_INDICES = [1, 2, 3];
@@ -50,6 +54,10 @@ const usePinning = $("#usePinning");
 const useBookmark = $("#useBookmark");
 const autoPinTabOnDrag = $("#autoPinTabOnDrag");
 const autoPinGroupOnDrag = $("#autoPinGroupOnDrag");
+const showSearchBar = $("#showSearchBar");
+const hideTabTitle = $("#hideTabTitle");
+const hideTabHost = $("#hideTabHost");
+const hideControlGroupSize = $("#hideControlGroupSize");
 const autoPinTabHint = $("#autoPinTabHint");
 const autoPinGroupHint = $("#autoPinGroupHint");
 const status = $("#status");
@@ -126,6 +134,10 @@ async function load() {
   useBookmark.checked = !!v.useBookmark;
   autoPinTabOnDrag.checked = !!v.autoPinTabOnDrag;
   autoPinGroupOnDrag.checked = !!v.autoPinGroupOnDrag;
+  showSearchBar.checked = !!v.showSearchBar;
+  hideTabTitle.checked = !!v.hideTabTitle;
+  hideTabHost.checked = !!v.hideTabHost;
+  hideControlGroupSize.checked = !!v.hideControlGroupSize;
   nameStyle.value = v.nameStyle;
   for (const k of SLIDERS) { sliders[k].value = String(v[k]); showSlider(k); }
   writeAnchors(v.autoGroupAnchors);
@@ -149,6 +161,10 @@ async function save() {
       useBookmark: useBookmark.checked,
       autoPinTabOnDrag: autoPinTabOnDrag.checked,
       autoPinGroupOnDrag: autoPinGroupOnDrag.checked,
+      showSearchBar: showSearchBar.checked,
+      hideTabTitle: hideTabTitle.checked,
+      hideTabHost: hideTabHost.checked,
+      hideControlGroupSize: hideControlGroupSize.checked,
       nameStyle: nameStyle.value,
       headSim: +sliders.headSim.value,
       curatedSim: +sliders.curatedSim.value,
@@ -179,6 +195,10 @@ usePinning.addEventListener("change", onChangeRefresh);
 useBookmark.addEventListener("change", save);
 autoPinTabOnDrag.addEventListener("change", save);
 autoPinGroupOnDrag.addEventListener("change", save);
+showSearchBar.addEventListener("change", save);
+hideTabTitle.addEventListener("change", save);
+hideTabHost.addEventListener("change", save);
+hideControlGroupSize.addEventListener("change", save);
 nameStyle.addEventListener("change", save);
 for (const k of SLIDERS) {
   sliders[k].addEventListener("input", () => showSlider(k));
@@ -188,6 +208,46 @@ for (const a of anchorInputs) {
   a.tabs.addEventListener("change", save);
   a.groups.addEventListener("change", save);
 }
+
+const SEARCH_COMMAND = "search-tabs";
+const searchShortcut = $("#searchShortcut");
+const searchShortcutSave = $("#searchShortcutSave");
+const searchShortcutReset = $("#searchShortcutReset");
+const shortcutStatus = $("#shortcutStatus");
+
+async function loadShortcut() {
+  try {
+    const cmds = await browser.commands.getAll();
+    const cmd = cmds.find((c) => c.name === SEARCH_COMMAND);
+    searchShortcut.value = cmd?.shortcut || "";
+  } catch (e) {
+    shortcutStatus.textContent = "Shortcut API unavailable: " + (e?.message || e);
+  }
+}
+
+async function saveShortcut() {
+  const shortcut = searchShortcut.value.trim();
+  try {
+    await browser.commands.update({ name: SEARCH_COMMAND, shortcut });
+    shortcutStatus.textContent = shortcut ? `Shortcut set to ${shortcut}.` : "Shortcut cleared.";
+  } catch (e) {
+    shortcutStatus.textContent = "Invalid shortcut: " + (e?.message || e);
+  }
+}
+
+async function resetShortcut() {
+  try {
+    await browser.commands.reset(SEARCH_COMMAND);
+    await loadShortcut();
+    shortcutStatus.textContent = "Shortcut reset to Ctrl+Shift+F.";
+  } catch (e) {
+    shortcutStatus.textContent = "Reset failed: " + (e?.message || e);
+  }
+}
+
+searchShortcutSave.addEventListener("click", saveShortcut);
+searchShortcutReset.addEventListener("click", resetShortcut);
+loadShortcut();
 
 load().catch((e) => {
   console.error(e);

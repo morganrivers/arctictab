@@ -18,6 +18,24 @@
         <p class="hint">Pinned tabs are kept where they are and never join a group.</p>
       </section>
       <section>
+        <h2>Tab search</h2>
+        <label>
+          <input type="checkbox" id="showSearchBar" />
+          Show tab search bar in sidebar
+        </label>
+        <p class="hint">A search box at the top of the sidebar for jumping to an open tab. Ranks matches with the on-device embedding model blended with keyword (BM25) matching. When hidden, the keyboard shortcut still opens it.</p>
+        <label>
+          Keyboard shortcut
+          <input type="text" id="searchShortcut" placeholder="Ctrl+Shift+F" autocomplete="off" spellcheck="false" />
+        </label>
+        <div class="row-btns">
+          <button type="button" id="searchShortcutSave">Set shortcut</button>
+          <button type="button" id="searchShortcutReset">Reset to Ctrl+Shift+F</button>
+        </div>
+        <p class="hint">Suggestions: <b>Ctrl+Shift+F</b>, <b>Ctrl+Shift+Space</b>, or <b>Alt+Shift+T</b>. Combine modifiers (Ctrl, Alt, Shift) with a letter or key.</p>
+        <p id="shortcutStatus" class="hint"></p>
+      </section>
+      <section>
         <h2>Pinning</h2>
         <label>
           <input type="checkbox" id="usePinning" />
@@ -101,6 +119,23 @@
           <input type="checkbox" id="hideStatus" />
           Hide status messages
         </label>
+      </section>
+      <section>
+        <h2>Tab display</h2>
+        <label>
+          <input type="checkbox" id="hideTabTitle" />
+          Hide tab title
+        </label>
+        <label>
+          <input type="checkbox" id="hideTabHost" />
+          Hide tab URL host
+        </label>
+        <p class="hint">Hiding both leaves just the tab icon.</p>
+        <label>
+          <input type="checkbox" id="hideControlGroupSize" />
+          Hide "Control group size" checkbox
+        </label>
+        <p class="hint">When hidden, control group size stays off and the size sliders are unavailable.</p>
       </section>
       <section>
         <details>
