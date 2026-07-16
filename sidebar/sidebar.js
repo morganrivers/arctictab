@@ -64,9 +64,6 @@ let state = null;
 let rerunTimer = null;
 let autoApplying = false;
 let suppressMoveRefresh = 0;
-// Tabs the user dragged in the native strip. Auto-apply leaves these alone so
-// it never yanks a manually placed tab back; cleared on explicit apply/re-organize.
-const manuallyPlaced = new Set();
 function suppressMovesFor(ms) {
   suppressMoveRefresh++;
   setTimeout(() => { suppressMoveRefresh--; }, ms);
@@ -289,6 +286,12 @@ let appliedSnapshot = null;
 function effectiveAutoApplyNaming() {
   return options.autoApplyGroups || options.autoApplyNaming;
 }
+// Pinning only makes sense when tabs get reorganized: a pin survives a move.
+// Without the move path, honoring a pin only fragments a contiguous cluster into
+// an ungroupable scatter, so pinning stays off unless reorganizing.
+function pinningActive({ forceSimilarity = false } = {}) {
+  return options.usePinning && (options.autoApplyGroups || forceSimilarity);
+}
 function applyButtonVisibility() {
   const autoSyncing = effectiveAutoApplyNaming();
   applyBtn.classList.toggle("hidden", !!options.hideApplyGroups || autoSyncing);
@@ -408,7 +411,6 @@ applyBtn.addEventListener("click", async () => {
       await assignNames(state.lastGroups, state.texts, state.tabs, state.embeddings);
     }
     updateAppliedSnapshot(state.lastGroups);
-    manuallyPlaced.clear();
     await applyTabGroups(state.lastGroups, { rearrange: false });
     renderGroups(state.lastGroups);
     status(`applied ${state.lastGroups.length} groups.`);
@@ -435,7 +437,6 @@ rearrangeBtn.addEventListener("click", async () => {
       updateAppliedSnapshot(state.lastGroups);
     }
     status(`re-organizing into ${state.lastGroups.length} fresh clusters...`);
-    manuallyPlaced.clear();
     const r = await applyTabGroups(state.lastGroups);
     if (r?.moved) status(`re-organized: moved ${r.moved} tabs into ${r.grouped} Firefox tab groups.`);
     else if (r?.grouped) status(`re-organized: ${r.grouped} Firefox tab groups applied (tabs already in order).`);
@@ -579,7 +580,8 @@ async function recluster({ forceSimilarity = false } = {}) {
     ({ groups, threshold, avg, iterations } = targetedFn(clusterTabs, clusterEmbeddings, { targetAvgSize: target, sizePenalty, smallSizePenalty }));
     statusMsg = `${groups.length} groups, avg ${avg.toFixed(1)} (${mode}, auto target ${target.toFixed(1)} for ${desired})`;
   }
-  groups = postProcessPins(groups, tabs);
+  if (pinningActive({ forceSimilarity })) groups = postProcessPins(groups, tabs);
+  else clusterPinId.clear();
   if (options.groupBySimilarity && !forceSimilarity && state?.embeddings) {
     const moved = await placeNewTabsBySimilarity(groups);
     if (moved) { scheduleRefresh("similarity-place"); return; }
@@ -599,7 +601,7 @@ async function recluster({ forceSimilarity = false } = {}) {
     if (options.autoApplyGroups) {
       autoApplying = true;
       try {
-        const r = await applyTabGroups(groups, { captureUndo: false, skipTabIds: manuallyPlaced });
+        const r = await applyTabGroups(groups, { captureUndo: false });
         if (r?.moved) status(`auto-apply: moved ${r.moved} tabs, ${r.grouped} groups.`);
         else if (r?.grouped) status(`auto-apply: ${r.grouped} groups applied (tabs already in order).`);
         else status(`auto-apply: nothing to change.`);
@@ -609,7 +611,7 @@ async function recluster({ forceSimilarity = false } = {}) {
     } else if (options.autoApplyNaming) {
       autoApplying = true;
       try {
-        const r = await applyTabGroups(groups, { rearrange: false, captureUndo: false, skipTabIds: manuallyPlaced });
+        const r = await applyTabGroups(groups, { rearrange: false, captureUndo: false });
         if (r?.grouped) status(`auto-apply: ${r.grouped} groups synced.`);
         else status(`auto-apply: nothing to change.`);
       }
@@ -888,14 +890,11 @@ browser.tabs.onRemoved.addListener((id) => {
     if (i !== -1) { g.tabIds.splice(i, 1); dirty = true; log(`pin cleanup: tab ${id} removed from pinned gid=${gid}`); }
   }
   if (dirty) savePinsSoon();
-  manuallyPlaced.delete(id);
   scheduleRefresh("onRemoved");
 });
 browser.tabs.onMoved.addListener((id, info) => {
   log("tabs.onMoved", id, info);
   if (suppressMoveRefresh > 0) { log("tabs.onMoved suppressed (self-move)"); return; }
-  manuallyPlaced.add(id);
-  log(`tabs.onMoved manual: tab ${id} marked as manually placed`);
   scheduleRefresh("onMoved");
 });
 browser.tabs.onUpdated.addListener((tabId, changeInfo) => {
@@ -967,7 +966,7 @@ function toggleGroupPin(clusterTabs, pinId) {
 async function handleTabDrop(sourceId, targetId, before, targetGroup) {
   const sourceGroup = findContainingGroup(sourceId, state?.lastGroups);
   const crossGroup = !sourceGroup || sourceGroup !== targetGroup;
-  if (options.usePinning && crossGroup && targetGroup) {
+  if (pinningActive() && crossGroup && targetGroup) {
     const targetKey = groupKey(targetGroup);
     let targetGid = clusterPinId.get(targetKey);
     if (options.autoPinGroupOnDrag && targetGid == null) {
@@ -1210,7 +1209,7 @@ async function rearrangeTabs(groups) {
   return { moved, total: ordered.length };
 }
 
-async function applyTabGroups(groups, { rearrange = true, captureUndo = true, skipTabIds = null } = {}) {
+async function applyTabGroups(groups, { rearrange = true, captureUndo = true } = {}) {
   if (captureUndo) await captureUndoSnapshot("apply-groups");
   let moved = 0;
   let total = 0;
@@ -1243,16 +1242,15 @@ async function applyTabGroups(groups, { rearrange = true, captureUndo = true, sk
     }
   }
 
-  const plan = planGroupSync(tabsNow, groups, { skipIds: skipTabIds });
+  const plan = planGroupSync(tabsNow, groups);
 
   const groupByTabId = new Map();
   for (const g of groups) for (const t of g) groupByTabId.set(t.id, g);
 
   let grouped = 0;
   // ungroup/group relocate tabs to make each cluster a contiguous native group.
-  // Suppress the resulting move events so they aren't recorded as manual
-  // placements, which would mark content tabs manuallyPlaced and split the very
-  // groups we just formed on the next recompute.
+  // Suppress the resulting move events so they don't trigger a redundant refresh
+  // mid-apply.
   suppressMoveRefresh++;
   try {
     if (plan.ungroup.length) {
@@ -1363,7 +1361,7 @@ function createTabRow(t, containingGroup) {
   pinBtn.className = "t-btn pin-btn" + (pinned ? " on" : "");
   pinBtn.title = pinned ? "Unpin tab" : "Pin tab to group";
   pinBtn.textContent = pinned ? "📌" : "📍";
-  if (!options.usePinning) pinBtn.classList.add("hidden");
+  if (!pinningActive()) pinBtn.classList.add("hidden");
   pinBtn.addEventListener("click", async (e) => {
     e.stopPropagation();
     await togglePinTab(t.id, containingGroup);
@@ -1412,7 +1410,7 @@ function createGroupCard(tabsInGroup, { label, getCurrentLabel, onRename, onBook
   pinBtn.className = "g-btn pin-btn" + (groupPinned ? " on" : "");
   pinBtn.title = groupPinned ? "Unpin group (allow auto-renaming and reclustering)" : "Pin group (freeze name and members)";
   pinBtn.textContent = groupPinned ? "📌" : "📍";
-  if (!options.usePinning) pinBtn.classList.add("hidden");
+  if (!pinningActive()) pinBtn.classList.add("hidden");
   pinBtn.addEventListener("click", (e) => {
     e.stopPropagation();
     onTogglePin();
@@ -1514,7 +1512,7 @@ function renderLiveView(main, groups) {
   const tabById = new Map(state.tabs.map((t) => [t.id, t]));
   const groupByTabId = new Map();
   for (const g of groups) for (const t of g) groupByTabId.set(t.id, g);
-  const items = mirrorLayout(state.tabs, groups, { skipIds: manuallyPlaced });
+  const items = mirrorLayout(state.tabs, groups);
   let looseWrap = null;
   for (const item of items) {
     if (item.type === "loose") {
