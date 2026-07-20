@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Your Algorithm — how platforms build different worlds for each of us</title>
+  <meta name="description" content="Pick a demographic profile and see the wildly different feed each social platform's algorithm would build for that person. An illustrative simulation about filter bubbles." />
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🫧</text></svg>" />
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <header class="hero">
+    <div class="wrap">
+      <div class="kicker">an illustrative simulation</div>
+      <h1>Your Algorithm</h1>
+      <p class="lede">
+        The same event, person, or day looks completely different depending on who the
+        algorithm thinks you are. Build a profile, pick a platform, and watch the world it
+        constructs for that person — then flip to <strong>Compare two worlds</strong> to see how
+        far apart two people's realities can sit on the exact same app.
+      </p>
+      <div class="presets">
+        <span class="presets-label">Try:</span>
+        <button class="preset" data-preset="contrast">Young man vs. mid-30s woman</button>
+        <button class="preset" data-preset="teens">Two teenagers</button>
+        <button class="preset" data-preset="seniors">Two seniors</button>
+      </div>
+    </div>
+  </header>
+
+  <main class="wrap">
+    <section class="controls">
+      <div id="editors" class="editors"></div>
+      <button id="compare-toggle" class="compare-btn">Compare two worlds →</button>
+    </section>
+
+    <section class="stage">
+      <nav id="platforms" class="platforms"></nav>
+      <p id="platform-tagline" class="platform-tagline"></p>
+      <div id="feeds" class="feeds"></div>
+    </section>
+
+    <section class="explainer">
+      <h2>How to read this</h2>
+      <div class="explainer-grid">
+        <div>
+          <h3>It's a model, not a mirror</h3>
+          <p>No real feeds are scraped. This is a hand-built model of the <em>incentives</em> —
+          how each platform tends to amplify engagement, outrage, and identity, and how
+          demographic signals steer what surfaces. The point is the <em>shape</em> of the
+          bubble, not any specific post.</p>
+        </div>
+        <div>
+          <h3>The meters</h3>
+          <p><strong>Outrage &amp; fear</strong> and <strong>engagement-bait</strong> track how
+          much of the feed is engineered to provoke rather than inform. <strong>Echo</strong>
+          shows how much of the political content already agrees with the person — the higher
+          it climbs, the tighter the bubble.</p>
+        </div>
+        <div>
+          <h3>Why the platforms differ</h3>
+          <p>X rewards the angriest quote-tweet; Instagram rewards aspiration; YouTube rewards
+          the next click down the rabbit hole; Facebook rewards the shared article that becomes
+          a town's truth. Same person, six different realities.</p>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <footer class="foot wrap">
+    <p>Built as an insight tool about filter bubbles and algorithmic amplification.
+    Content is fictional and illustrative. Open source — the whole model lives in
+    <code>docs/data.js</code>.</p>
+  </footer>
+
+  <script type="module" src="app.js"></script>
+</body>
+</html>
