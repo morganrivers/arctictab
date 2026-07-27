@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "arctictab",
   "version": "1.0.0",
-  "description": "Automatically groups your open tabs by topic using an on-device AI embedding model. Nothing leaves your browser: tab titles and page text are embedded locally, clustered into named groups, and applied as native Firefox tab groups. Includes a fast semantic tab search palette.",
+  "description": "Groups your open tabs by topic using an on-device AI embedding model. Nothing leaves your browser: pages are embedded locally, clustered into named groups, and applied as native Firefox tab groups. Includes a semantic tab search.",
   "browser_specific_settings": {
     "gecko": {
       "id": "arctictab@morganrivers.com",
