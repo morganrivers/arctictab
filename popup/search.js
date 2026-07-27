@@ -2,6 +2,13 @@ import { buildText, embedBatch, getExtractor } from "../lib/embed.js";
 import { getMany } from "../lib/cache.js";
 import { buildBm25, rankTabs } from "../lib/search.js";
 import { initTheme } from "../lib/theme.js";
+import { createFileLogger } from "../lib/devlog.js";
+import { TRANSPARENT_PX, faviconUrlFor } from "../lib/favicon.js";
+
+const dev = createFileLogger("popup", { flushMs: 60_000 });
+dev.log("popup start", location.search);
+window.addEventListener("pagehide", () => { dev.flush(); });
+let inflightEmbeds = 0;
 
 initTheme();
 
@@ -10,21 +17,6 @@ const srcWindowId = params.has("win") ? Number(params.get("win")) : null;
 
 const input = document.getElementById("q");
 const resultsEl = document.getElementById("results");
-
-const TRANSPARENT_PX =
-  "data:image/svg+xml;utf8,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%2014%2014%22%3E%3Crect%20width%3D%2214%22%20height%3D%2214%22%20rx%3D%223%22%20fill%3D%22%23999%22%20opacity%3D%220.25%22%2F%3E%3C%2Fsvg%3E";
-
-function faviconUrlFor(tab) {
-  if (tab.favIconUrl && !tab.favIconUrl.startsWith("chrome:")) return tab.favIconUrl;
-  return fallbackFaviconUrl(tab);
-}
-function fallbackFaviconUrl(tab) {
-  try {
-    const u = new URL(tab.url);
-    if (u.protocol === "http:" || u.protocol === "https:") return `${u.origin}/favicon.ico`;
-  } catch {}
-  return TRANSPARENT_PX;
-}
 
 let docs = [];
 let bm25 = null;
@@ -44,6 +36,7 @@ async function loadDocs() {
     embedding: cached[i]?.embedding || null,
   }));
   bm25 = buildBm25(texts);
+  dev.log("loadDocs tabs=", tabs.length, "embedHits=", cached.filter((c) => c?.embedding).length);
 }
 
 function showAll() {
@@ -69,10 +62,7 @@ function render(items) {
     fav.className = "favicon";
     fav.alt = "";
     fav.referrerPolicy = "no-referrer";
-    fav.addEventListener("error", () => {
-      const fb = fallbackFaviconUrl(tab);
-      fav.src = fb !== fav.src ? fb : TRANSPARENT_PX;
-    });
+    fav.addEventListener("error", () => { fav.src = TRANSPARENT_PX; });
     fav.src = faviconUrlFor(tab);
     const title = document.createElement("span");
     title.className = "r-title";
@@ -108,14 +98,22 @@ async function run(q) {
   const fallback = setTimeout(() => {
     if (!embedded && mySeq === seq) computeAndRender(q, null, false);
   }, 120);
+  const t0 = performance.now();
+  inflightEmbeds++;
+  dev.log("run q.len=", q.length, "seq=", mySeq, "inflight=", inflightEmbeds);
   try {
     await getExtractor();
+    const tExt = performance.now();
     const [emb] = await embedBatch([q]);
     embedded = true;
+    inflightEmbeds--;
+    dev.log("run done seq=", mySeq, "extractorMs=", Math.round(tExt - t0), "embedMs=", Math.round(performance.now() - tExt), "inflight=", inflightEmbeds);
     clearTimeout(fallback);
     if (mySeq === seq) computeAndRender(q, emb);
   } catch (e) {
     embedded = true;
+    inflightEmbeds--;
+    dev.log("run ERROR seq=", mySeq, "ms=", Math.round(performance.now() - t0), "inflight=", inflightEmbeds, "err=", String(e?.message || e));
     clearTimeout(fallback);
     console.warn("[arctictab] popup embed failed", e);
     if (mySeq === seq) computeAndRender(q, null);
@@ -152,12 +150,23 @@ input.addEventListener("keydown", (e) => {
   else if (e.key === "Enter") { e.preventDefault(); if (selIdx >= 0) activate(current[selIdx]); }
   else if (e.key === "Escape") { e.preventDefault(); window.close(); }
 });
-window.addEventListener("blur", () => window.close());
+let blurArmed = false;
+setTimeout(() => { blurArmed = true; }, 500);
+window.addEventListener("blur", () => {
+  if (!blurArmed) return;
+  setTimeout(() => { if (!document.hasFocus()) { dev.log("popup close on sustained blur"); window.close(); } }, 250);
+});
 
 loadDocs()
   .then(() => { showAll(); input.focus(); })
   .catch((e) => {
+    dev.log("loadDocs FAILED", String(e?.message || e));
     console.error("[arctictab] popup load failed", e);
     resultsEl.innerHTML = '<li class="empty">Failed to load tabs</li>';
   });
-getExtractor().catch(() => {});
+
+const tWarm = performance.now();
+dev.log("warm getExtractor start");
+getExtractor()
+  .then(() => dev.log("warm getExtractor ready ms=", Math.round(performance.now() - tWarm)))
+  .catch((e) => dev.log("warm getExtractor FAILED ms=", Math.round(performance.now() - tWarm), String(e?.message || e)));

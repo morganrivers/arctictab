@@ -32,6 +32,7 @@ const DEFAULTS = {
   hideTabTitle: false,
   hideTabHost: false,
   hideControlGroupSize: false,
+  debugLogging: false,
 };
 const SLIDERS = ["headSim", "curatedSim", "keywordFrac"];
 const ANCHOR_INDICES = [1, 2, 3];
@@ -58,6 +59,7 @@ const showSearchBar = $("#showSearchBar");
 const hideTabTitle = $("#hideTabTitle");
 const hideTabHost = $("#hideTabHost");
 const hideControlGroupSize = $("#hideControlGroupSize");
+const debugLogging = $("#debugLogging");
 const autoPinTabHint = $("#autoPinTabHint");
 const autoPinGroupHint = $("#autoPinGroupHint");
 const status = $("#status");
@@ -138,6 +140,7 @@ async function load() {
   hideTabTitle.checked = !!v.hideTabTitle;
   hideTabHost.checked = !!v.hideTabHost;
   hideControlGroupSize.checked = !!v.hideControlGroupSize;
+  debugLogging.checked = !!v.debugLogging;
   nameStyle.value = v.nameStyle;
   for (const k of SLIDERS) { sliders[k].value = String(v[k]); showSlider(k); }
   writeAnchors(v.autoGroupAnchors);
@@ -165,6 +168,7 @@ async function save() {
       hideTabTitle: hideTabTitle.checked,
       hideTabHost: hideTabHost.checked,
       hideControlGroupSize: hideControlGroupSize.checked,
+      debugLogging: debugLogging.checked,
       nameStyle: nameStyle.value,
       headSim: +sliders.headSim.value,
       curatedSim: +sliders.curatedSim.value,
@@ -199,6 +203,7 @@ showSearchBar.addEventListener("change", save);
 hideTabTitle.addEventListener("change", save);
 hideTabHost.addEventListener("change", save);
 hideControlGroupSize.addEventListener("change", save);
+debugLogging.addEventListener("change", save);
 nameStyle.addEventListener("change", save);
 for (const k of SLIDERS) {
   sliders[k].addEventListener("input", () => showSlider(k));

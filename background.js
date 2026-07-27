@@ -1,3 +1,5 @@
+import { debugLog } from "./lib/log.js";
+
 browser.action.onClicked.addListener(async () => {
   await browser.sidebarAction.open();
 });
@@ -7,6 +9,7 @@ const SEARCH_POPUP_H = 460;
 let searchPopupId = null;
 
 browser.commands.onCommand.addListener(async (command) => {
+  debugLog("[arctictab][bg] onCommand fired:", command);
   if (command !== "search-tabs") return;
   if (searchPopupId != null) {
     try {

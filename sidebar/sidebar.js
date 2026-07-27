@@ -5,6 +5,8 @@ import { nameGroups } from "../lib/names.js";
 import { initTheme } from "../lib/theme.js";
 import { orderTabIdsForStrip, planGroupSync, mirrorLayout } from "../lib/taborder.js";
 import { buildBm25, rankTabs } from "../lib/search.js";
+import { TRANSPARENT_PX, faviconUrlFor } from "../lib/favicon.js";
+import { debugLog, isDebugEnabled, onDebugChange } from "../lib/log.js";
 
 initTheme();
 
@@ -12,7 +14,7 @@ const $ = (s) => document.querySelector(s);
 let statusEl = null;
 let statusHideTimer = null;
 const status = (m) => {
-  console.log("[arctictab][status]", m);
+  debugLog("[arctictab][status]", m);
   statusEl = statusEl || document.getElementById("status-line");
   if (!statusEl) return;
   if (options?.hideStatus) { statusEl.classList.add("hidden"); return; }
@@ -119,6 +121,7 @@ const OPTIONS_DEFAULTS = {
   hideTabTitle: false,
   hideTabHost: false,
   hideControlGroupSize: false,
+  debugLogging: false,
 };
 
 const PINS_KEY = "arctictab:pins";
@@ -301,12 +304,16 @@ function applyButtonVisibility() {
   const autoSyncing = effectiveAutoApplyNaming();
   applyBtn.classList.toggle("hidden", !!options.hideApplyGroups || autoSyncing);
   rearrangeBtn.classList.toggle("hidden", !!options.hideRearrange);
+  const logsBtnEl = document.getElementById("logs-btn");
+  if (logsBtnEl) logsBtnEl.classList.toggle("hidden", !isDebugEnabled());
   if (options.hideStatus) {
     statusEl = statusEl || document.getElementById("status-line");
     if (statusEl) statusEl.classList.add("hidden");
   }
   updateCountsDisplay();
 }
+
+onDebugChange(() => applyButtonVisibility());
 
 function applyDisplayOptions() {
   document.body.classList.toggle("hide-tab-title", !!options.hideTabTitle);
@@ -357,11 +364,12 @@ browser.storage.onChanged.addListener((changes, area) => {
 $("#opts-btn").addEventListener("click", () => browser.runtime.openOptionsPage());
 
 document.addEventListener("mousedown", (e) => {
+  if (!isDebugEnabled()) return;
   const row = e.target.closest?.(".tab");
-  console.log("[arctictab][probe] document mousedown", e.target?.tagName, e.target?.className, "row?", !!row, row ? `draggable=${row.getAttribute("draggable")}` : "");
+  debugLog("[arctictab][probe] document mousedown", e.target?.tagName, e.target?.className, "row?", !!row, row ? `draggable=${row.getAttribute("draggable")}` : "");
 }, true);
 document.addEventListener("dragstart", (e) => {
-  console.log("[arctictab][probe] document dragstart", e.target?.tagName, e.target?.className);
+  if (isDebugEnabled()) debugLog("[arctictab][probe] document dragstart", e.target?.tagName, e.target?.className);
   document.body.classList.add("tab-dragging");
   for (const h of document.querySelectorAll(".group-header h3[contenteditable]")) {
     h.dataset.prevEditable = h.contentEditable;
@@ -565,6 +573,7 @@ async function placeNewTabsBySimilarity(groups) {
 }
 
 async function recluster({ forceSimilarity = false } = {}) {
+  const tRecluster = performance.now();
   console.assert(state != null, "state must exist");
   const { tabs, embeddings, texts } = state;
   const clusterTabs = tabs;
@@ -601,16 +610,22 @@ async function recluster({ forceSimilarity = false } = {}) {
   if (pinningActive({ forceSimilarity })) groups = postProcessPins(groups, tabs);
   else clusterPinId.clear();
   if (options.groupBySimilarity && !forceSimilarity && state?.embeddings) {
+    const tPlace = performance.now();
     const moved = await placeNewTabsBySimilarity(groups);
+    log(`recluster placeNewTabsBySimilarity ${(performance.now() - tPlace).toFixed(0)}ms moved=${moved}`);
     if (moved) { scheduleRefresh("similarity-place"); return; }
   }
   state.lastGroups = groups;
   state.clusterResult = { threshold, avg, iterations };
-  log(`recluster result: ${groups.length} groups (${clusterPinId.size} pinned), avg ${avg.toFixed(1)}, thr ${threshold.toFixed(2)}`);
+  const reclusterMs = performance.now() - tRecluster;
+  log(`recluster result: ${groups.length} groups (${clusterPinId.size} pinned), avg ${avg.toFixed(1)}, thr ${threshold.toFixed(2)}, ${reclusterMs.toFixed(0)}ms`);
+  if (reclusterMs > 500) log(`recluster SLOW: ${reclusterMs.toFixed(0)}ms for ${clusterTabs.length} tabs (${mode})`);
   const currentKeys = new Set(groups.map(groupKey));
   for (const k of customLabels.keys()) if (!currentKeys.has(k)) customLabels.delete(k);
   if (effectiveAutoApplyNaming()) {
+    const tNames = performance.now();
     await assignNames(groups, texts, tabs, embeddings);
+    log(`recluster assignNames ${(performance.now() - tNames).toFixed(0)}ms for ${groups.length} groups`);
     updateAppliedSnapshot(groups);
   }
   renderGroups(groups);
@@ -618,8 +633,10 @@ async function recluster({ forceSimilarity = false } = {}) {
   if (!autoApplying && !skipNextAutoApply) {
     if (options.autoApplyGroups) {
       autoApplying = true;
+      const tApply = performance.now();
       try {
         const r = await applyTabGroups(groups, { captureUndo: false });
+        log(`recluster applyTabGroups ${(performance.now() - tApply).toFixed(0)}ms moved=${r?.moved || 0} grouped=${r?.grouped || 0}`);
         if (r?.moved) status(`auto-apply: moved ${r.moved} tabs, ${r.grouped} groups.`);
         else if (r?.grouped) status(`auto-apply: ${r.grouped} groups applied (tabs already in order).`);
         else status(`auto-apply: nothing to change.`);
@@ -692,7 +709,8 @@ async function flushLogsNow() {
 }
 
 const log = (...args) => {
-  console.log("[arctictab]", ...args);
+  if (!isDebugEnabled()) return;
+  debugLog("[arctictab]", ...args);
   const parts = args.map((a) => (typeof a === "string" ? a : JSON.stringify(a)));
   logBuffer.push(`${new Date().toISOString()} [arctictab] ${parts.join(" ")}\n`);
 };
@@ -750,7 +768,7 @@ async function logTabSnapshot({ force = false } = {}) {
   };
 
   const json = JSON.stringify(snapshot);
-  console.log("[arctictab][snapshot]", json);
+  debugLog("[arctictab][snapshot]", json);
   const fname = `${LOG_DIR_PREFIX}/snapshot-${new Date().toISOString().replace(/[:.]/g, "-")}.json`;
   try {
     await downloadBlob(fname, new Blob([json], { type: "application/json" }), "uniquify");
@@ -898,10 +916,21 @@ function scheduleRefresh(source) {
   }, 600);
 }
 
+let sidebarWindowId = null;
+browser.windows.getCurrent().then((w) => { sidebarWindowId = w.id; });
+function isForeignWindow(windowId) {
+  return sidebarWindowId !== null && windowId != null && windowId !== sidebarWindowId;
+}
+
 log("registering tabs.* listeners");
-browser.tabs.onCreated.addListener((t) => { log("tabs.onCreated", t.id, t.url); scheduleRefresh("onCreated"); });
-browser.tabs.onRemoved.addListener((id) => {
+browser.tabs.onCreated.addListener((t) => {
+  if (isForeignWindow(t.windowId)) { log("tabs.onCreated ignored (foreign window)", t.id, t.windowId); return; }
+  log("tabs.onCreated", t.id, t.url); scheduleRefresh("onCreated");
+});
+browser.tabs.onRemoved.addListener((id, removeInfo) => {
+  if (isForeignWindow(removeInfo?.windowId)) { log("tabs.onRemoved ignored (foreign window)", id); return; }
   log("tabs.onRemoved", id);
+  lastMeaningfulUrl.delete(id);
   let dirty = false;
   for (const [gid, g] of pinnedGroups) {
     const i = g.tabIds.indexOf(id);
@@ -911,21 +940,40 @@ browser.tabs.onRemoved.addListener((id) => {
   scheduleRefresh("onRemoved");
 });
 browser.tabs.onMoved.addListener((id, info) => {
+  if (isForeignWindow(info?.windowId)) { log("tabs.onMoved ignored (foreign window)", id); return; }
   log("tabs.onMoved", id, info);
   if (suppressMoveRefresh > 0) { log("tabs.onMoved suppressed (self-move)"); return; }
   scheduleRefresh("onMoved");
 });
-browser.tabs.onUpdated.addListener((tabId, changeInfo) => {
+const lastMeaningfulUrl = new Map();
+function meaningfulUrl(url) {
+  try {
+    const u = new URL(url);
+    return u.origin + u.pathname;
+  } catch {
+    return url;
+  }
+}
+browser.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
+  if (isForeignWindow(tab?.windowId)) return;
   log("tabs.onUpdated raw", tabId, changeInfo);
+  if (changeInfo.url && !changeInfo.title) {
+    const next = meaningfulUrl(changeInfo.url);
+    if (lastMeaningfulUrl.get(tabId) === next) {
+      log("tabs.onUpdated skipped: query/hash-only change", tabId, changeInfo.url);
+      return;
+    }
+    lastMeaningfulUrl.set(tabId, next);
+  } else if (changeInfo.url) {
+    lastMeaningfulUrl.set(tabId, meaningfulUrl(changeInfo.url));
+  }
   if (changeInfo.url || changeInfo.title || changeInfo.status === "complete") {
     log("tabs.onUpdated trigger", tabId, changeInfo);
     scheduleRefresh("onUpdated");
   }
 });
-let sidebarWindowId = null;
-browser.windows.getCurrent().then((w) => { sidebarWindowId = w.id; });
 browser.tabs.onActivated.addListener(({ tabId, windowId }) => {
-  if (sidebarWindowId !== null && windowId !== sidebarWindowId) return;
+  if (isForeignWindow(windowId)) return;
   for (const el of document.querySelectorAll(".tab.active")) el.classList.remove("active");
   const row = document.querySelector(`.tab[data-tab-id="${tabId}"]`);
   if (row) row.classList.add("active");
@@ -1358,15 +1406,7 @@ function createTabRow(t, containingGroup) {
   fav.className = "favicon";
   fav.alt = "";
   fav.referrerPolicy = "no-referrer";
-  let faviconAttempts = 0;
-  fav.addEventListener("error", () => {
-    faviconAttempts++;
-    if (faviconAttempts === 1) {
-      const fb = fallbackFaviconUrl(t);
-      if (fb !== fav.src) { fav.src = fb; return; }
-    }
-    fav.src = TRANSPARENT_PX;
-  });
+  fav.addEventListener("error", () => { fav.src = TRANSPARENT_PX; });
   fav.src = faviconUrlFor(t);
   const titleSpan = document.createElement("span");
   titleSpan.className = "title";
@@ -1596,21 +1636,6 @@ function renderFrozenView(main) {
   renderUngroupedTabs(main, used);
 }
 
-const TRANSPARENT_PX = "data:image/svg+xml;utf8,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%2014%2014%22%3E%3Crect%20width%3D%2214%22%20height%3D%2214%22%20rx%3D%223%22%20fill%3D%22%23999%22%20opacity%3D%220.25%22%2F%3E%3C%2Fsvg%3E";
-
-function faviconUrlFor(tab) {
-  if (tab.favIconUrl && !tab.favIconUrl.startsWith("chrome:")) return tab.favIconUrl;
-  return fallbackFaviconUrl(tab);
-}
-function fallbackFaviconUrl(tab) {
-  try {
-    const u = new URL(tab.url);
-    if (u.protocol === "http:" || u.protocol === "https:") {
-      return `${u.origin}/favicon.ico`;
-    }
-  } catch {}
-  return TRANSPARENT_PX;
-}
 
 async function findBookmarksToolbarId() {
   const tree = await browser.bookmarks.getTree();
@@ -1737,10 +1762,7 @@ function renderSearchResults(items) {
     fav.className = "favicon";
     fav.alt = "";
     fav.referrerPolicy = "no-referrer";
-    fav.addEventListener("error", () => {
-      const fb = fallbackFaviconUrl(tab);
-      fav.src = fb !== fav.src ? fb : TRANSPARENT_PX;
-    });
+    fav.addEventListener("error", () => { fav.src = TRANSPARENT_PX; });
     fav.src = faviconUrlFor(tab);
     const title = document.createElement("span");
     title.className = "sr-title";
