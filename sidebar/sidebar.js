@@ -7,6 +7,7 @@ import { orderTabIdsForStrip, planGroupSync, mirrorLayout } from "../lib/taborde
 import { buildBm25, rankTabs } from "../lib/search.js";
 import { TRANSPARENT_PX, faviconUrlFor } from "../lib/favicon.js";
 import { debugLog, isDebugEnabled, onDebugChange } from "../lib/log.js";
+import { createDevLogger } from "../lib/devlog.js";
 
 initTheme();
 
@@ -483,13 +484,16 @@ const logsBtn = $("#logs-btn");
 logsBtn.addEventListener("click", async () => {
   logsBtn.disabled = true;
   try {
-    status("downloading logs + snapshot...");
-    await flushLogsNow();
-    await logTabSnapshot({ force: true });
-    status("logs downloaded.");
+    const snapshotJson = await logTabSnapshot({ force: true });
+    const parts = [dev.text()];
+    if (snapshotJson) parts.push(`\n--- snapshot ---\n${snapshotJson}\n`);
+    const text = parts.join("");
+    if (!text.trim()) { status("no logs yet (enable Diagnostics in options)."); return; }
+    await navigator.clipboard.writeText(text);
+    status(`copied logs to clipboard (${text.length} chars).`);
   } catch (e) {
     console.error(e);
-    status("log download error: " + (e?.message || e));
+    status("log copy error: " + (e?.message || e));
   } finally {
     logsBtn.disabled = false;
   }
@@ -688,32 +692,8 @@ async function assignNames(groups, texts, tabs, embeddings) {
   groups.forEach((g, i) => autoNames.set(groupKey(g), names[i]));
 }
 
-const LOG_DIR_PREFIX = "arctictab";
-const SESSION_START_ISO = new Date().toISOString().replace(/[:.]/g, "-");
-const SESSION_LOG_NAME = `${LOG_DIR_PREFIX}/session-${SESSION_START_ISO}.log`;
-const logBuffer = [];
-
-async function downloadBlob(filename, blob, conflictAction) {
-  const url = URL.createObjectURL(blob);
-  try {
-    await browser.downloads.download({ url, filename, conflictAction, saveAs: false });
-  } finally {
-    setTimeout(() => URL.revokeObjectURL(url), 60_000);
-  }
-}
-
-async function flushLogsNow() {
-  if (!logBuffer.length) return;
-  const text = logBuffer.join("");
-  await downloadBlob(SESSION_LOG_NAME, new Blob([text], { type: "text/plain" }), "overwrite");
-}
-
-const log = (...args) => {
-  if (!isDebugEnabled()) return;
-  debugLog("[arctictab]", ...args);
-  const parts = args.map((a) => (typeof a === "string" ? a : JSON.stringify(a)));
-  logBuffer.push(`${new Date().toISOString()} [arctictab] ${parts.join(" ")}\n`);
-};
+const dev = createDevLogger("sidebar");
+const log = dev.log;
 
 function groupCentroid(group, tabIdxById, embeddings) {
   const dim = embeddings[0].length;
@@ -769,13 +749,7 @@ async function logTabSnapshot({ force = false } = {}) {
 
   const json = JSON.stringify(snapshot);
   debugLog("[arctictab][snapshot]", json);
-  const fname = `${LOG_DIR_PREFIX}/snapshot-${new Date().toISOString().replace(/[:.]/g, "-")}.json`;
-  try {
-    await downloadBlob(fname, new Blob([json], { type: "application/json" }), "uniquify");
-    log(`snapshot saved to ${fname}`);
-  } catch (e) {
-    console.warn("[arctictab] snapshot save failed", e);
-  }
+  return json;
 }
 
 async function queryTabs(retries = 3) {

@@ -2,12 +2,11 @@ import { buildText, embedBatch, getExtractor } from "../lib/embed.js";
 import { getMany } from "../lib/cache.js";
 import { buildBm25, rankTabs } from "../lib/search.js";
 import { initTheme } from "../lib/theme.js";
-import { createFileLogger } from "../lib/devlog.js";
+import { createDevLogger } from "../lib/devlog.js";
 import { TRANSPARENT_PX, faviconUrlFor } from "../lib/favicon.js";
 
-const dev = createFileLogger("popup", { flushMs: 60_000 });
+const dev = createDevLogger("popup");
 dev.log("popup start", location.search);
-window.addEventListener("pagehide", () => { dev.flush(); });
 let inflightEmbeds = 0;
 
 initTheme();
