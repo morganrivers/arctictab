@@ -21,6 +21,7 @@ copy() {
 
 copy "${PKG_DIST}/transformers.js" "${VENDOR}/transformers.js"
 copy "${PKG_DIST}/ort-wasm-simd-threaded.jsep.wasm" "${WASM_DIR}/ort-wasm-simd-threaded.jsep.wasm"
+copy "node_modules/@huggingface/transformers/LICENSE" "${VENDOR}/LICENSE"
 
 fetch() {
   local url="$1"

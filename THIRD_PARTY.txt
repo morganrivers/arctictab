@@ -1,0 +1,16 @@
+arctictab bundles the following third-party components, unmodified.
+
+@huggingface/transformers 3.0.2
+  Files: vendor/transformers/transformers.js
+  License: Apache License 2.0 (see vendor/transformers/LICENSE)
+  Source: https://github.com/huggingface/transformers.js/releases/tag/3.0.2
+
+ONNX Runtime Web (redistributed inside @huggingface/transformers 3.0.2)
+  Files: vendor/transformers/wasm/ort-wasm-simd-threaded.jsep.wasm
+  License: MIT
+  Source: https://github.com/microsoft/onnxruntime
+
+Snowflake/snowflake-arctic-embed-xs
+  Files: vendor/transformers/models/Snowflake/snowflake-arctic-embed-xs/
+  License: Apache License 2.0
+  Source: https://huggingface.co/Snowflake/snowflake-arctic-embed-xs
