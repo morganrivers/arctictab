@@ -8,6 +8,7 @@ import { buildBm25, rankTabs } from "../lib/search.js";
 import { TRANSPARENT_PX, faviconUrlFor } from "../lib/favicon.js";
 import { debugLog, isDebugEnabled, onDebugChange } from "../lib/log.js";
 import { createDevLogger } from "../lib/devlog.js";
+import { OPTIONS_KEY, DEFAULT_AUTO_ANCHORS, OPTIONS_DEFAULTS } from "../lib/options.js";
 
 initTheme();
 
@@ -91,39 +92,6 @@ function labelFor(group) {
   if (customLabels.has(key)) return customLabels.get(key);
   return autoNames.get(key) || "group";
 }
-
-const OPTIONS_KEY = "arctictab:options";
-const DEFAULT_AUTO_ANCHORS = [
-  { tabs: 10, groups: 3 },
-  { tabs: 15, groups: 4 },
-  { tabs: 25, groups: 5 },
-];
-const OPTIONS_DEFAULTS = {
-  excludePinned: true,
-  groupBySimilarity: false,
-  reorganizeGroups: false,
-  hideApplyGroups: false,
-  hideRearrange: false,
-  hideGroupCount: false,
-  hideTabCount: false,
-  hideStatus: true,
-  autoApplyGroups: false,
-  autoApplyNaming: true,
-  nameStyle: "mixed",
-  headSim: 0.22,
-  curatedSim: 0.27,
-  keywordFrac: 0.34,
-  autoGroupAnchors: DEFAULT_AUTO_ANCHORS,
-  usePinning: true,
-  useBookmark: false,
-  autoPinTabOnDrag: true,
-  autoPinGroupOnDrag: true,
-  showSearchBar: true,
-  hideTabTitle: false,
-  hideTabHost: false,
-  hideControlGroupSize: false,
-  debugLogging: false,
-};
 
 const PINS_KEY = "arctictab:pins";
 let pinnedGroups = new Map();
@@ -307,6 +275,8 @@ function applyButtonVisibility() {
   rearrangeBtn.classList.toggle("hidden", !!options.hideRearrange);
   const logsBtnEl = document.getElementById("logs-btn");
   if (logsBtnEl) logsBtnEl.classList.toggle("hidden", !isDebugEnabled());
+  const copyStateBtnEl = document.getElementById("copy-state-btn");
+  if (copyStateBtnEl) copyStateBtnEl.classList.toggle("hidden", !options.showCopyState);
   if (options.hideStatus) {
     statusEl = statusEl || document.getElementById("status-line");
     if (statusEl) statusEl.classList.add("hidden");
@@ -639,7 +609,7 @@ async function recluster({ forceSimilarity = false } = {}) {
       autoApplying = true;
       const tApply = performance.now();
       try {
-        const r = await applyTabGroups(groups, { captureUndo: false });
+        const r = await applyTabGroups(groups);
         log(`recluster applyTabGroups ${(performance.now() - tApply).toFixed(0)}ms moved=${r?.moved || 0} grouped=${r?.grouped || 0}`);
         if (r?.moved) status(`auto-apply: moved ${r.moved} tabs, ${r.grouped} groups.`);
         else if (r?.grouped) status(`auto-apply: ${r.grouped} groups applied (tabs already in order).`);
@@ -650,7 +620,7 @@ async function recluster({ forceSimilarity = false } = {}) {
     } else if (options.autoApplyNaming) {
       autoApplying = true;
       try {
-        const r = await applyTabGroups(groups, { rearrange: false, captureUndo: false });
+        const r = await applyTabGroups(groups, { rearrange: false });
         if (r?.grouped) status(`auto-apply: ${r.grouped} groups synced.`);
         else status(`auto-apply: nothing to change.`);
       }
@@ -659,7 +629,7 @@ async function recluster({ forceSimilarity = false } = {}) {
     }
   } else if (skipNextAutoApply) {
     skipNextAutoApply = false;
-    log("recluster: skipped one auto-apply (undo guard)");
+    log("recluster: skipped one auto-apply");
   }
 }
 
@@ -1059,157 +1029,7 @@ async function ungroupAll(tabIds) {
   }
 }
 
-let lastUndoSnapshot = null;
 let skipNextAutoApply = false;
-const undoBtn = $("#undo-btn");
-
-function setUndoEnabled(enabled) {
-  if (undoBtn) undoBtn.disabled = !enabled;
-}
-
-async function captureUndoSnapshot(label, { closingTabIds = [] } = {}) {
-  try {
-    const tabs = await browser.tabs.query({ currentWindow: true });
-    const groupIds = [...new Set(tabs.map((t) => t.groupId).filter((g) => g != null && g !== -1))];
-    const groupMeta = new Map();
-    if (browser.tabGroups?.get) {
-      for (const gid of groupIds) {
-        try {
-          const g = await browser.tabGroups.get(gid);
-          groupMeta.set(gid, { title: g.title || "", color: g.color || null });
-        } catch (e) { log(`undo-snapshot: tabGroups.get(${gid}) failed: ${e?.message || e}`); }
-      }
-    }
-    const closingSet = new Set(closingTabIds);
-    const closedTabs = tabs
-      .filter((t) => closingSet.has(t.id))
-      .map((t) => ({
-        origId: t.id,
-        url: t.url,
-        title: t.title || "",
-        index: t.index,
-        pinned: !!t.pinned,
-        groupId: t.groupId ?? -1,
-      }));
-    const windowId = tabs[0]?.windowId;
-    lastUndoSnapshot = {
-      label,
-      tabs: tabs.map((t) => ({ id: t.id, index: t.index, groupId: t.groupId ?? -1 })),
-      groupMeta,
-      closedTabs,
-      windowId,
-      timestamp: Date.now(),
-    };
-    setUndoEnabled(true);
-    log(`undo-snapshot [${label}]: ${lastUndoSnapshot.tabs.length} tabs, ${groupIds.length} native groups, ${closedTabs.length} closing, windowId=${windowId}`);
-    if (closingTabIds.length) {
-      const missing = closingTabIds.filter((id) => !tabs.find((t) => t.id === id));
-      if (missing.length) log(`undo-snapshot [${label}]: WARN ${missing.length} closingTabIds not found in window (ids: ${missing.join(",")})`);
-    }
-  } catch (e) {
-    log(`undo-snapshot [${label}] failed: ${e?.message || e}`);
-  }
-}
-
-async function applyUndoSnapshot() {
-  if (!lastUndoSnapshot) { status("nothing to undo."); return; }
-  const snap = lastUndoSnapshot;
-  log(`undo: restoring snapshot [${snap.label}] (${snap.tabs.length} tabs)`);
-  suppressMoveRefresh++;
-  try {
-    const closedIdMap = new Map();
-    const sortedClosed = [...(snap.closedTabs || [])].sort((a, b) => a.index - b.index);
-    log(`undo: snapshot has ${sortedClosed.length} closed tabs to reopen`);
-    let recreated = 0;
-    for (const c of sortedClosed) {
-      try {
-        const createArgs = {
-          url: c.url,
-          active: false,
-          pinned: c.pinned,
-          index: c.index,
-        };
-        if (snap.windowId != null) createArgs.windowId = snap.windowId;
-        const created = await browser.tabs.create(createArgs);
-        closedIdMap.set(c.origId, created.id);
-        recreated++;
-        log(`undo: recreated ${c.url} → new id ${created.id}`);
-      } catch (e) {
-        log(`undo: recreate ${c.url} failed: ${e?.message || e}`);
-      }
-    }
-
-    const live = await browser.tabs.query({ currentWindow: true });
-    const liveIds = new Set(live.map((t) => t.id));
-    const restorable = snap.tabs
-      .map((t) => {
-        if (closedIdMap.has(t.id)) return { ...t, id: closedIdMap.get(t.id) };
-        return liveIds.has(t.id) ? t : null;
-      })
-      .filter(Boolean);
-    if (restorable.length !== snap.tabs.length) {
-      log(`undo: ${snap.tabs.length - restorable.length} snapshotted tab(s) no longer exist; skipping those`);
-    }
-
-    if (browser.tabs.ungroup) {
-      try { await browser.tabs.ungroup(restorable.map((t) => t.id)); }
-      catch (e) { log(`undo: ungroup failed: ${e?.message || e}`); }
-    }
-
-    const sorted = [...restorable].sort((a, b) => a.index - b.index);
-    for (const t of sorted) {
-      try { await browser.tabs.move(t.id, { index: t.index }); }
-      catch (e) { log(`undo: move tab ${t.id} → ${t.index} failed: ${e?.message || e}`); }
-    }
-
-    const byOrigGid = new Map();
-    for (const t of restorable) {
-      if (t.groupId == null || t.groupId === -1) continue;
-      if (!byOrigGid.has(t.groupId)) byOrigGid.set(t.groupId, []);
-      byOrigGid.get(t.groupId).push(t.id);
-    }
-    let regrouped = 0;
-    for (const [origGid, ids] of byOrigGid) {
-      if (ids.length < 1) continue;
-      try {
-        const newGid = await browser.tabs.group({ tabIds: ids });
-        const meta = snap.groupMeta?.get(origGid);
-        if (meta && browser.tabGroups?.update) {
-          const update = {};
-          if (meta.title) update.title = meta.title;
-          if (meta.color) update.color = meta.color;
-          if (Object.keys(update).length) await browser.tabGroups.update(newGid, update);
-        }
-        regrouped++;
-      } catch (e) {
-        log(`undo: regroup ${ids.length} tabs (orig gid ${origGid}) failed: ${e?.message || e}`);
-      }
-    }
-    const reopenMsg = sortedClosed.length
-      ? `, reopened ${recreated}/${sortedClosed.length} closed tab(s)`
-      : "";
-    status(`undid ${snap.label}: restored ${restorable.length} tabs, ${regrouped} groups${reopenMsg}.`);
-    log(`undo complete: ${restorable.length} tabs restored, ${regrouped} groups recreated, ${recreated}/${sortedClosed.length} closed tabs reopened`);
-  } catch (e) {
-    console.error(e);
-    status("undo error: " + (e?.message || e));
-    log(`undo failed: ${e?.message || e}`);
-  } finally {
-    setTimeout(() => { suppressMoveRefresh--; }, 500);
-    lastUndoSnapshot = null;
-    setUndoEnabled(false);
-    skipNextAutoApply = true;
-    scheduleRefresh("undo-done");
-  }
-}
-
-if (undoBtn) {
-  undoBtn.addEventListener("click", async () => {
-    undoBtn.disabled = true;
-    try { await applyUndoSnapshot(); }
-    finally { setUndoEnabled(!!lastUndoSnapshot); }
-  });
-}
 
 async function snapshotTabOrder(label, ids) {
   try {
@@ -1249,8 +1069,7 @@ async function rearrangeTabs(groups) {
   return { moved, total: ordered.length };
 }
 
-async function applyTabGroups(groups, { rearrange = true, captureUndo = true } = {}) {
-  if (captureUndo) await captureUndoSnapshot("apply-groups");
+async function applyTabGroups(groups, { rearrange = true } = {}) {
   let moved = 0;
   let total = 0;
   if (rearrange) {
@@ -1643,10 +1462,7 @@ async function bookmarkGroup(label, groupTabs) {
 
 async function closeTabs(ids, { label } = {}) {
   try {
-    const snapLabel = label || (ids.length === 1 ? "close-tab" : `close-${ids.length}-tabs`);
-    await captureUndoSnapshot(snapLabel, { closingTabIds: ids });
-    const captured = lastUndoSnapshot?.closedTabs?.length || 0;
-    status(`closing ${ids.length} tab(s); undo available (${captured} captured).`);
+    status(`closing ${ids.length} tab(s)...`);
     await browser.tabs.remove(ids);
     if (state) {
       const remove = new Set(ids);

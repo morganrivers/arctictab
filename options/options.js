@@ -1,39 +1,8 @@
 import { initTheme } from "../lib/theme.js";
+import { OPTIONS_KEY, DEFAULT_AUTO_ANCHORS, OPTIONS_DEFAULTS as DEFAULTS } from "../lib/options.js";
 
 initTheme();
 
-const OPTIONS_KEY = "arctictab:options";
-const DEFAULT_AUTO_ANCHORS = [
-  { tabs: 10, groups: 3 },
-  { tabs: 15, groups: 4 },
-  { tabs: 25, groups: 5 },
-];
-const DEFAULTS = {
-  excludePinned: true,
-  groupBySimilarity: false,
-  reorganizeGroups: false,
-  hideApplyGroups: false,
-  hideRearrange: false,
-  hideGroupCount: false,
-  hideTabCount: false,
-  hideStatus: true,
-  autoApplyGroups: false,
-  autoApplyNaming: true,
-  nameStyle: "mixed",
-  headSim: 0.22,
-  curatedSim: 0.27,
-  keywordFrac: 0.34,
-  autoGroupAnchors: DEFAULT_AUTO_ANCHORS,
-  usePinning: true,
-  useBookmark: false,
-  autoPinTabOnDrag: true,
-  autoPinGroupOnDrag: true,
-  showSearchBar: true,
-  hideTabTitle: false,
-  hideTabHost: false,
-  hideControlGroupSize: false,
-  debugLogging: false,
-};
 const SLIDERS = ["headSim", "curatedSim", "keywordFrac"];
 const ANCHOR_INDICES = [1, 2, 3];
 
@@ -56,6 +25,7 @@ const useBookmark = $("#useBookmark");
 const autoPinTabOnDrag = $("#autoPinTabOnDrag");
 const autoPinGroupOnDrag = $("#autoPinGroupOnDrag");
 const showSearchBar = $("#showSearchBar");
+const showCopyState = $("#showCopyState");
 const hideTabTitle = $("#hideTabTitle");
 const hideTabHost = $("#hideTabHost");
 const hideControlGroupSize = $("#hideControlGroupSize");
@@ -137,6 +107,7 @@ async function load() {
   autoPinTabOnDrag.checked = !!v.autoPinTabOnDrag;
   autoPinGroupOnDrag.checked = !!v.autoPinGroupOnDrag;
   showSearchBar.checked = !!v.showSearchBar;
+  showCopyState.checked = !!v.showCopyState;
   hideTabTitle.checked = !!v.hideTabTitle;
   hideTabHost.checked = !!v.hideTabHost;
   hideControlGroupSize.checked = !!v.hideControlGroupSize;
@@ -165,6 +136,7 @@ async function save() {
       autoPinTabOnDrag: autoPinTabOnDrag.checked,
       autoPinGroupOnDrag: autoPinGroupOnDrag.checked,
       showSearchBar: showSearchBar.checked,
+      showCopyState: showCopyState.checked,
       hideTabTitle: hideTabTitle.checked,
       hideTabHost: hideTabHost.checked,
       hideControlGroupSize: hideControlGroupSize.checked,
@@ -200,6 +172,7 @@ useBookmark.addEventListener("change", save);
 autoPinTabOnDrag.addEventListener("change", save);
 autoPinGroupOnDrag.addEventListener("change", save);
 showSearchBar.addEventListener("change", save);
+showCopyState.addEventListener("change", save);
 hideTabTitle.addEventListener("change", save);
 hideTabHost.addEventListener("change", save);
 hideControlGroupSize.addEventListener("change", save);

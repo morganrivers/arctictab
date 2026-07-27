@@ -116,6 +116,13 @@
       </section>
       <section>
         <label>
+          <input type="checkbox" id="showCopyState" />
+          Show "Copy state" button
+        </label>
+        <p class="hint">Adds the ⧉ button to the sidebar, which copies the current tabs, clusters and settings to the clipboard as JSON. Useful for reporting a bad grouping.</p>
+      </section>
+      <section>
+        <label>
           <input type="checkbox" id="hideStatus" />
           Hide status messages
         </label>
@@ -205,7 +212,12 @@
           <input type="checkbox" id="debugLogging" />
           Enable debug logging
         </label>
-        <p class="hint">Off by default. When on, verbose messages are written to the browser console and the ⬇ button (session log + snapshot download) appears in the sidebar. Leave off unless you're diagnosing an issue.</p>
+        <p class="hint">Off by default. When on, verbose messages are written to the browser console and the ⎘ button (copies the session log and a snapshot to the clipboard) appears in the sidebar. Leave off unless you're diagnosing an issue.</p>
+      </section>
+      <section>
+        <h2>Support</h2>
+        <p class="hint">arctictab is free and runs entirely on your machine. If it saves you time, please buy me a coffee.</p>
+        <a class="bmc-btn" href="https://www.buymeacoffee.com/morganrivers" target="_blank" rel="noopener noreferrer">☕ Buy me a coffee</a>
       </section>
       <p id="status" class="status"></p>
     </main>
