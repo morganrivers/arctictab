@@ -1,6 +1,6 @@
 import { buildText, embedBatch, getExtractor, onExtractorProgress } from "../lib/embed.js";
 import { getMany, put } from "../lib/cache.js";
-import { detectExcursions, detectExcursionsTargeted, clusterByEmbeddings, clusterByEmbeddingsTargeted, orderGroupsBySimilarity } from "../lib/cluster.js";
+import { detectExcursions, detectExcursionsTargeted, clusterByEmbeddings, clusterByEmbeddingsTargeted, orderGroupsBySimilarity, absorbSingletons } from "../lib/cluster.js";
 import { nameGroups } from "../lib/names.js";
 import { initTheme } from "../lib/theme.js";
 import { orderTabIdsForStrip, planGroupSync, mirrorLayout } from "../lib/taborder.js";
@@ -203,7 +203,7 @@ function renamePinnedGroup(gid, name) {
   g.name = name;
   savePinsSoon();
 }
-function postProcessPins(groups, allTabs) {
+function postProcessPins(groups, allTabs, embeddings) {
   clusterPinId.clear();
   if (pinnedGroups.size === 0) return groups;
   const tabById = new Map(allTabs.map((t) => [t.id, t]));
@@ -228,7 +228,9 @@ function postProcessPins(groups, allTabs) {
     return aMin - bMin;
   });
   for (const c of combined) if (c.gid != null) clusterPinId.set(groupKey(c.tabs), c.gid);
-  return combined.map((c) => c.tabs);
+  // Subtracting pinned tabs can leave a one-tab remnant behind, so re-run the
+  // absorption that the clusterer already guarantees.
+  return absorbSingletons(combined.map((c) => c.tabs), allTabs, embeddings, claimed);
 }
 function findContainingGroup(tabId, groups) {
   if (!groups) return null;
@@ -639,7 +641,7 @@ async function recluster({ forceSimilarity = false } = {}) {
     ({ groups, threshold, avg, iterations } = targetedFn(clusterTabs, clusterEmbeddings, { targetAvgSize: target, sizePenalty, smallSizePenalty, groupIdenticalTogether: options.groupIdenticalTogether, identicalOwnGroup: options.identicalOwnGroup }));
     statusMsg = `${groups.length} groups, avg ${avg.toFixed(1)} (${mode}, auto target ${target.toFixed(1)} for ${desired})`;
   }
-  if (pinningActive({ forceSimilarity })) groups = postProcessPins(groups, tabs);
+  if (pinningActive({ forceSimilarity })) groups = postProcessPins(groups, tabs, embeddings);
   else clusterPinId.clear();
   state.lastGroups = groups;
   state.clusterResult = { threshold, avg, iterations };
