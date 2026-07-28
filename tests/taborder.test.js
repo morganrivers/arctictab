@@ -162,3 +162,14 @@ test("reordering a tab inside its cluster keeps the whole cluster grouped", () =
   assert.deepEqual(plan.group, [{ tabIds: [1, 2, 3] }]);
   assert.deepEqual(plan.ungroup, []);
 });
+
+test("orderTabIdsForStrip pulls identical tabs in a group into one run", () => {
+  const group = [
+    { id: 1, index: 0, url: "about:newtab", title: "New Tab" },
+    { id: 2, index: 1, url: "https://a.example/", title: "A" },
+    { id: 3, index: 2, url: "about:newtab", title: "New Tab" },
+    { id: 4, index: 3, url: "https://b.example/", title: "B" },
+    { id: 5, index: 4, url: "about:newtab", title: "New Tab" },
+  ];
+  assert.deepEqual(orderTabIdsForStrip([group]), [1, 3, 5, 2, 4]);
+});
