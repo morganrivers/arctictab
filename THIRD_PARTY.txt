@@ -10,6 +10,11 @@ ONNX Runtime Web (redistributed inside @huggingface/transformers 3.0.2)
   License: MIT
   Source: https://github.com/microsoft/onnxruntime
 
+Noto Emoji (snowflake, U+2744)
+  Files: icons/icon.svg, icons/icon-48.png, icons/icon-96.png, icons/icon-128.png
+  License: Apache License 2.0 (image resources)
+  Source: https://github.com/googlefonts/noto-emoji/blob/main/svg/emoji_u2744.svg
+
 Snowflake/snowflake-arctic-embed-xs
   Files: vendor/transformers/models/Snowflake/snowflake-arctic-embed-xs/
   License: Apache License 2.0
