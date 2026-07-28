@@ -1,46 +1,22 @@
-import { buildText, embedBatch, getExtractor } from "../lib/embed.js";
-import { getMany } from "../lib/cache.js";
-import { buildBm25, rankTabs } from "../lib/search.js";
 import { initTheme } from "../lib/theme.js";
 import { createDevLogger } from "../lib/devlog.js";
 import { TRANSPARENT_PX, faviconUrlFor } from "../lib/favicon.js";
+import { querySearch, resolveWindowId } from "../lib/searchclient.js";
 
 const dev = createDevLogger("popup");
 dev.log("popup start", location.search);
-let inflightEmbeds = 0;
 
 initTheme();
 
 const params = new URLSearchParams(location.search);
-const srcWindowId = params.has("win") ? Number(params.get("win")) : null;
-
 const input = document.getElementById("q");
 const resultsEl = document.getElementById("results");
 
-let docs = [];
-let bm25 = null;
+let windowId = null;
 let seq = 0;
 let debounce = null;
 let selIdx = -1;
 let current = [];
-
-async function loadDocs() {
-  const query = srcWindowId != null ? { windowId: srcWindowId } : { currentWindow: true };
-  const tabs = await browser.tabs.query(query);
-  const texts = tabs.map((t) => buildText(t, null));
-  const cached = await getMany(tabs.map((t) => t.url));
-  docs = tabs.map((t, i) => ({
-    tab: t,
-    text: texts[i],
-    embedding: cached[i]?.embedding || null,
-  }));
-  bm25 = buildBm25(texts);
-  dev.log("loadDocs tabs=", tabs.length, "embedHits=", cached.filter((c) => c?.embedding).length);
-}
-
-function showAll() {
-  render(docs.map((d) => d.tab));
-}
 
 function render(items) {
   current = items;
@@ -77,45 +53,23 @@ function render(items) {
   });
 }
 
-function computeAndRender(query, queryEmbedding, allowEmpty = true) {
-  if (!bm25) return;
-  const ranked = rankTabs({
-    bm25Index: bm25,
-    embeddings: docs.map((d) => d.embedding),
-    query,
-    queryEmbedding,
-    limit: 20,
-  });
-  if (!ranked.length && !allowEmpty) return;
-  render(ranked.map((r) => docs[r.index].tab));
-}
-
-async function run(q) {
+async function run(query) {
   const mySeq = ++seq;
-  if (q.length < 2) { computeAndRender(q, null); return; }
-  let embedded = false;
-  const fallback = setTimeout(() => {
-    if (!embedded && mySeq === seq) computeAndRender(q, null, false);
-  }, 120);
   const t0 = performance.now();
-  inflightEmbeds++;
-  dev.log("run q.len=", q.length, "seq=", mySeq, "inflight=", inflightEmbeds);
+  let done = false;
+  if (query) {
+    querySearch({ windowId, query, semantic: false })
+      .then((tabs) => { if (mySeq === seq && !done) render(tabs); })
+      .catch((e) => dev.log("lexical search failed", String(e?.message || e)));
+  }
   try {
-    await getExtractor();
-    const tExt = performance.now();
-    const [emb] = await embedBatch([q]);
-    embedded = true;
-    inflightEmbeds--;
-    dev.log("run done seq=", mySeq, "extractorMs=", Math.round(tExt - t0), "embedMs=", Math.round(performance.now() - tExt), "inflight=", inflightEmbeds);
-    clearTimeout(fallback);
-    if (mySeq === seq) computeAndRender(q, emb);
+    const tabs = await querySearch({ windowId, query, semantic: true });
+    done = true;
+    dev.log("search done seq=", mySeq, "ms=", Math.round(performance.now() - t0));
+    if (mySeq === seq) render(tabs);
   } catch (e) {
-    embedded = true;
-    inflightEmbeds--;
-    dev.log("run ERROR seq=", mySeq, "ms=", Math.round(performance.now() - t0), "inflight=", inflightEmbeds, "err=", String(e?.message || e));
-    clearTimeout(fallback);
-    console.warn("[arctictab] popup embed failed", e);
-    if (mySeq === seq) computeAndRender(q, null);
+    done = true;
+    dev.log("search ERROR seq=", mySeq, "err=", String(e?.message || e));
   }
 }
 
@@ -140,7 +94,7 @@ async function activate(tab) {
 input.addEventListener("input", () => {
   const q = input.value.trim();
   clearTimeout(debounce);
-  if (!q) { seq++; showAll(); return; }
+  if (!q) { seq++; run(""); return; }
   debounce = setTimeout(() => run(q), 110);
 });
 input.addEventListener("keydown", (e) => {
@@ -156,16 +110,14 @@ window.addEventListener("blur", () => {
   setTimeout(() => { if (!document.hasFocus()) { dev.log("popup close on sustained blur"); window.close(); } }, 250);
 });
 
-loadDocs()
-  .then(() => { showAll(); input.focus(); })
+resolveWindowId(params.has("win") ? Number(params.get("win")) : null)
+  .then(async (id) => {
+    windowId = id;
+    input.focus();
+    await run("");
+  })
   .catch((e) => {
-    dev.log("loadDocs FAILED", String(e?.message || e));
+    dev.log("popup load FAILED", String(e?.message || e));
     console.error("[arctictab] popup load failed", e);
     resultsEl.innerHTML = '<li class="empty">Failed to load tabs</li>';
   });
-
-const tWarm = performance.now();
-dev.log("warm getExtractor start");
-getExtractor()
-  .then(() => dev.log("warm getExtractor ready ms=", Math.round(performance.now() - tWarm)))
-  .catch((e) => dev.log("warm getExtractor FAILED ms=", Math.round(performance.now() - tWarm), String(e?.message || e)));

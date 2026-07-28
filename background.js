@@ -1,4 +1,5 @@
 import { debugLog } from "./lib/log.js";
+import { searchTabs, invalidateIndex } from "./lib/searchindex.js";
 
 browser.action.onClicked.addListener(async () => {
   await browser.sidebarAction.open();
@@ -45,5 +46,23 @@ browser.runtime.onMessage.addListener(async (msg, sender) => {
     });
     return result?.result ?? null;
   }
+  if (msg.type === "searchTabs") {
+    return searchTabs(msg);
+  }
+  if (msg.type === "invalidateSearchIndex") {
+    invalidateIndex();
+    return null;
+  }
   return null;
 });
+
+for (const event of [
+  browser.tabs.onCreated,
+  browser.tabs.onRemoved,
+  browser.tabs.onUpdated,
+  browser.tabs.onMoved,
+  browser.tabs.onAttached,
+  browser.tabs.onDetached,
+]) {
+  event.addListener(() => invalidateIndex());
+}

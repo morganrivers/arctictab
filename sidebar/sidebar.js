@@ -4,7 +4,7 @@ import { detectExcursions, detectExcursionsTargeted, clusterByEmbeddings, cluste
 import { nameGroups } from "../lib/names.js";
 import { initTheme } from "../lib/theme.js";
 import { orderTabIdsForStrip, planGroupSync, mirrorLayout } from "../lib/taborder.js";
-import { buildBm25, rankTabs } from "../lib/search.js";
+import { querySearch, resolveWindowId } from "../lib/searchclient.js";
 import { TRANSPARENT_PX, faviconUrlFor } from "../lib/favicon.js";
 import { debugLog, isDebugEnabled, onDebugChange } from "../lib/log.js";
 import { createDevLogger } from "../lib/devlog.js";
@@ -907,6 +907,7 @@ async function refresh({ silent = false, reclusterOpts = {}, force = false } = {
       }
     }
     log(`refresh #${id} embedding done in ${(performance.now() - tEmb).toFixed(0)}ms`);
+    await browser.runtime.sendMessage({ type: "invalidateSearchIndex" });
   }
 
   const missing = embeddings.findIndex((e) => !e);
@@ -1719,8 +1720,6 @@ const searchBox = document.getElementById("search-box");
 const searchInput = document.getElementById("search-input");
 const searchClear = document.getElementById("search-clear");
 const searchResults = document.getElementById("search-results");
-let searchDocs = [];
-let searchBm25 = null;
 let searchSeq = 0;
 let searchEmbedTimer = null;
 let searchSelIdx = -1;
@@ -1741,20 +1740,6 @@ document.addEventListener("visibilitychange", () => {
   if (!document.hidden) refreshSearchPlaceholder();
 });
 
-async function rebuildSearchDocs() {
-  const tabs = await browser.tabs.query({ currentWindow: true });
-  const st = state?.tabs || [];
-  const idIdx = new Map(st.map((t, i) => [t.id, i]));
-  searchDocs = tabs.map((t) => {
-    const si = idIdx.get(t.id);
-    return {
-      tab: t,
-      text: si != null ? state.texts[si] : buildText(t, null),
-      embedding: si != null ? state.embeddings[si] : null,
-    };
-  });
-  searchBm25 = buildBm25(searchDocs.map((d) => d.text));
-}
 
 function hideSearchResults() {
   searchResults.classList.add("hidden");
@@ -1800,36 +1785,22 @@ function renderSearchResults(items) {
   searchResults.classList.remove("hidden");
 }
 
-function computeAndRenderSearch(query, queryEmbedding, allowEmpty = true) {
-  if (!searchBm25) return;
-  const ranked = rankTabs({
-    bm25Index: searchBm25,
-    embeddings: searchDocs.map((d) => d.embedding),
-    query,
-    queryEmbedding,
-    limit: 12,
-  });
-  if (!ranked.length && !allowEmpty) return;
-  renderSearchResults(ranked.map((r) => searchDocs[r.index].tab));
-}
-
-async function runSearch(q) {
-  const seq = ++searchSeq;
-  if (q.length < 2) { computeAndRenderSearch(q, null); return; }
-  let embedded = false;
-  const fallback = setTimeout(() => {
-    if (!embedded && seq === searchSeq) computeAndRenderSearch(q, null, false);
-  }, 180);
+async function runSearch(query) {
+  const mySeq = ++searchSeq;
+  const windowId = await resolveWindowId(null);
+  let done = false;
+  if (query) {
+    querySearch({ windowId, query, semantic: false })
+      .then((tabs) => { if (mySeq === searchSeq && !done) renderSearchResults(tabs); })
+      .catch((e) => console.warn("[arctictab] lexical search failed", e));
+  }
   try {
-    const [emb] = await embedBatch([q]);
-    embedded = true;
-    clearTimeout(fallback);
-    if (seq === searchSeq) computeAndRenderSearch(q, emb);
+    const tabs = await querySearch({ windowId, query, semantic: true });
+    done = true;
+    if (mySeq === searchSeq) renderSearchResults(tabs);
   } catch (e) {
-    embedded = true;
-    clearTimeout(fallback);
-    console.warn("[arctictab] search embed failed", e);
-    if (seq === searchSeq) computeAndRenderSearch(q, null);
+    done = true;
+    console.warn("[arctictab] search failed", e);
   }
 }
 
@@ -1863,23 +1834,14 @@ function closeSearch() {
   hideSearchResults();
 }
 
-function showAllTabs() {
-  renderSearchResults(searchDocs.map((d) => d.tab));
-}
-
-searchInput.addEventListener("focus", async () => {
-  try {
-    await rebuildSearchDocs();
-    if (!searchInput.value.trim()) showAllTabs();
-  } catch (e) {
-    console.warn("[arctictab] search index failed", e);
-  }
+searchInput.addEventListener("focus", () => {
+  if (!searchInput.value.trim()) runSearch("");
 });
 searchInput.addEventListener("input", () => {
   const q = searchInput.value.trim();
   searchClear.classList.toggle("hidden", !q);
   clearTimeout(searchEmbedTimer);
-  if (!q) { searchSeq++; showAllTabs(); return; }
+  if (!q) { runSearch(""); return; }
   searchEmbedTimer = setTimeout(() => runSearch(q), 130);
 });
 searchInput.addEventListener("keydown", (e) => {
