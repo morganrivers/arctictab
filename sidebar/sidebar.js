@@ -1,6 +1,6 @@
 import { buildText, embedBatch, getExtractor, onExtractorProgress } from "../lib/embed.js";
 import { getMany, put } from "../lib/cache.js";
-import { detectExcursions, detectExcursionsTargeted, clusterByEmbeddings, clusterByEmbeddingsTargeted, orderGroupsBySimilarity, placeNewTab } from "../lib/cluster.js";
+import { detectExcursions, detectExcursionsTargeted, clusterByEmbeddings, clusterByEmbeddingsTargeted, orderGroupsBySimilarity } from "../lib/cluster.js";
 import { nameGroups } from "../lib/names.js";
 import { initTheme } from "../lib/theme.js";
 import { orderTabIdsForStrip, planGroupSync, mirrorLayout } from "../lib/taborder.js";
@@ -272,7 +272,7 @@ function pinningActive({ forceSimilarity = false } = {}) {
 function applyButtonVisibility() {
   const autoSyncing = effectiveAutoApplyNaming();
   applyBtn.classList.toggle("hidden", !!options.hideApplyGroups || autoSyncing);
-  rearrangeBtn.classList.toggle("hidden", !!options.hideRearrange);
+  rearrangeBtn.classList.toggle("hidden", !!options.hideRearrange || !!options.autoApplyGroups);
   const logsBtnEl = document.getElementById("logs-btn");
   if (logsBtnEl) logsBtnEl.classList.toggle("hidden", !isDebugEnabled());
   const copyStateBtnEl = document.getElementById("copy-state-btn");
@@ -391,10 +391,95 @@ updatePenaltyDisplay();
 updateSmallPenaltyDisplay();
 applyControlVisibility();
 
+const DIAL_R = 20;
+const DIAL_C = 2 * Math.PI * DIAL_R;
+let busyVisible = false;
+
+function createDialCircle(cls) {
+  const c = document.createElementNS("http://www.w3.org/2000/svg", "circle");
+  c.setAttribute("class", cls);
+  c.setAttribute("cx", "24");
+  c.setAttribute("cy", "24");
+  c.setAttribute("r", String(DIAL_R));
+  return c;
+}
+
+function createBusyEl() {
+  const wrap = document.createElement("div");
+  wrap.className = "busy";
+  wrap.id = "busy";
+  const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  svg.setAttribute("class", "busy-dial");
+  svg.setAttribute("viewBox", "0 0 48 48");
+  const arc = createDialCircle("arc");
+  arc.setAttribute("stroke-dasharray", String(DIAL_C));
+  arc.setAttribute("stroke-dashoffset", String(DIAL_C));
+  svg.append(createDialCircle("track"), arc);
+  const label = document.createElement("div");
+  label.className = "busy-label";
+  wrap.append(svg, label);
+  return wrap;
+}
+
+function showBusy(label, frac = null) {
+  const host = $("#groups");
+  if (!busyVisible) {
+    host.replaceChildren(createBusyEl());
+    busyVisible = true;
+  }
+  const busy = $("#busy");
+  if (!busy) return;
+  busy.querySelector(".busy-label").textContent = label;
+  const arc = busy.querySelector(".arc");
+  const determinate = typeof frac === "number" && Number.isFinite(frac);
+  busy.classList.toggle("indeterminate", !determinate);
+  const shown = determinate ? Math.max(0, Math.min(1, frac)) : 0.25;
+  arc.setAttribute("stroke-dashoffset", String(DIAL_C * (1 - shown)));
+}
+
+function hideBusy() {
+  busyVisible = false;
+  resetProgress();
+}
+
+const PHASE_ORDER = ["tabs", "meta", "model", "embed", "cluster"];
+const PHASE_WEIGHT = { tabs: 0.05, meta: 0.15, model: 0.4, embed: 0.35, cluster: 0.05 };
+console.assert(
+  Math.abs(PHASE_ORDER.reduce((s, k) => s + PHASE_WEIGHT[k], 0) - 1) < 1e-9,
+  "phase weights must sum to 1",
+);
+const phaseFrac = new Map();
+let shownFrac = 0;
+
+function resetProgress() {
+  phaseFrac.clear();
+  shownFrac = 0;
+}
+
+function setPhase(name, frac, label) {
+  const at = PHASE_ORDER.indexOf(name);
+  console.assert(at !== -1, `unknown progress phase ${name}`);
+  phaseFrac.set(name, Math.max(0, Math.min(1, frac)));
+  let total = 0;
+  for (const key of PHASE_ORDER) total += PHASE_WEIGHT[key] * (phaseFrac.get(key) ?? 0);
+  shownFrac = Math.max(shownFrac, total);
+  showBusy(label, shownFrac);
+}
+
+// The model files are bundled locally, so bytes arrive almost instantly and the
+// real wait is the ONNX session build, which reports nothing. Download only
+// earns the first 85% of the model phase; the rest lands when getExtractor resolves.
+const MODEL_DOWNLOAD_SHARE = 0.85;
+
 onExtractorProgress((p) => {
   if (!p || !p.status) return;
-  if (p.status === "progress" && typeof p.progress === "number") {
-    status(`model: ${p.file || ""} ${p.progress.toFixed(0)}%`);
+  if (typeof p.overall === "number") {
+    const pct = (p.overall * 100).toFixed(0);
+    status(`model: loading ${pct}%`);
+    if (busyVisible) setPhase("model", p.overall * MODEL_DOWNLOAD_SHARE, `Loading model ${pct}%`);
+  } else if (p.status === "initializing") {
+    status("model: preparing runtime");
+    if (busyVisible) setPhase("model", MODEL_DOWNLOAD_SHARE, "Preparing model runtime");
   } else if (p.status === "ready" || p.status === "done") {
     status(`model: ${p.status}`);
   } else {
@@ -519,33 +604,6 @@ function scheduleRecluster() {
   }, 80);
 }
 
-// Similarity mode, mirror-safe: route one loose (singleton) tab into the tail of
-// its most-similar multi-tab group. Only the loose tab moves, so existing tabs
-// stay put and the strip stays a set of contiguous blocks. Returns true if it
-// moved a tab (caller reschedules so the linear pass regroups it).
-async function placeNewTabsBySimilarity(groups) {
-  const multi = groups.filter((g) => g.length >= 2);
-  if (!multi.length) return false;
-  const embByTabId = new Map(state.tabs.map((t, i) => [t.id, state.embeddings[i]]));
-  for (const g of groups) {
-    if (g.length !== 1) continue;
-    const t = g[0];
-    const emb = embByTabId.get(t.id);
-    if (!emb) continue;
-    const res = placeNewTab(emb, multi, embByTabId);
-    if (!res) continue;
-    let target = res.targetIndex;
-    if (t.index < target) target -= 1;
-    if (target === t.index) continue;
-    log(`similarity-place: tab ${t.id} (idx ${t.index}) → idx ${target} (sim ${res.similarity.toFixed(3)})`);
-    suppressMovesFor(500);
-    try { await browser.tabs.move(t.id, { index: target }); }
-    catch (e) { log(`similarity-place: move failed: ${e?.message || e}`); continue; }
-    return true;
-  }
-  return false;
-}
-
 async function recluster({ forceSimilarity = false } = {}) {
   const tRecluster = performance.now();
   console.assert(state != null, "state must exist");
@@ -554,10 +612,10 @@ async function recluster({ forceSimilarity = false } = {}) {
   const clusterEmbeddings = embeddings;
   console.assert(clusterTabs.length === clusterEmbeddings.length, "cluster tabs/embeddings length mismatch");
   let groups, threshold, avg, iterations, statusMsg;
-  // Only the explicit Re-organize action (forceSimilarity) may reshuffle existing
-  // tabs by content. The auto path always stays linear/contiguous so the strip
-  // mirror holds; similarity mode instead routes new tabs (below) into groups.
-  const useSimilarity = forceSimilarity;
+  // Content clustering may reshuffle the strip, so it is only allowed on paths
+  // that are permitted to move tabs: the explicit Re-organize action and
+  // auto-organize. Otherwise stay linear/contiguous so the strip mirror holds.
+  const useSimilarity = forceSimilarity || options.autoApplyGroups;
   const mode = useSimilarity ? "agglomerative" : "linear";
   if (clusterTabs.length === 0) {
     groups = [];
@@ -569,7 +627,7 @@ async function recluster({ forceSimilarity = false } = {}) {
     const smallSizePenalty = smallPenaltyFromSlider();
     log(`recluster (${mode}): ${clusterTabs.length} tabs, target=${target}, penalty=${sizePenalty.toFixed(2)}, smallPenalty=${smallSizePenalty.toFixed(2)}`);
     const targetedFn = useSimilarity ? clusterByEmbeddingsTargeted : detectExcursionsTargeted;
-    ({ groups, threshold, avg, iterations } = targetedFn(clusterTabs, clusterEmbeddings, { targetAvgSize: target, sizePenalty, smallSizePenalty }));
+    ({ groups, threshold, avg, iterations } = targetedFn(clusterTabs, clusterEmbeddings, { targetAvgSize: target, sizePenalty, smallSizePenalty, groupIdenticalTogether: options.groupIdenticalTogether, identicalOwnGroup: options.identicalOwnGroup }));
     statusMsg = `${groups.length} groups, avg ${avg.toFixed(1)} (${mode}, target ${target}, thr ${threshold.toFixed(2)}, ${iterations} iter)`;
   } else {
     const desired = Math.max(1, Math.round(computeAutoGroupCount(clusterTabs.length, options.autoGroupAnchors)));
@@ -578,30 +636,27 @@ async function recluster({ forceSimilarity = false } = {}) {
     const smallSizePenalty = smallPenaltyFromSlider();
     log(`recluster (${mode}, auto): ${clusterTabs.length} tabs → ${desired} groups, target=${target.toFixed(2)}, penalty=${sizePenalty.toFixed(2)}, smallPenalty=${smallSizePenalty.toFixed(2)}`);
     const targetedFn = useSimilarity ? clusterByEmbeddingsTargeted : detectExcursionsTargeted;
-    ({ groups, threshold, avg, iterations } = targetedFn(clusterTabs, clusterEmbeddings, { targetAvgSize: target, sizePenalty, smallSizePenalty }));
+    ({ groups, threshold, avg, iterations } = targetedFn(clusterTabs, clusterEmbeddings, { targetAvgSize: target, sizePenalty, smallSizePenalty, groupIdenticalTogether: options.groupIdenticalTogether, identicalOwnGroup: options.identicalOwnGroup }));
     statusMsg = `${groups.length} groups, avg ${avg.toFixed(1)} (${mode}, auto target ${target.toFixed(1)} for ${desired})`;
   }
   if (pinningActive({ forceSimilarity })) groups = postProcessPins(groups, tabs);
   else clusterPinId.clear();
-  if (options.groupBySimilarity && !forceSimilarity && state?.embeddings) {
-    const tPlace = performance.now();
-    const moved = await placeNewTabsBySimilarity(groups);
-    log(`recluster placeNewTabsBySimilarity ${(performance.now() - tPlace).toFixed(0)}ms moved=${moved}`);
-    if (moved) { scheduleRefresh("similarity-place"); return; }
-  }
   state.lastGroups = groups;
   state.clusterResult = { threshold, avg, iterations };
+  logClusterChurn(groups);
   const reclusterMs = performance.now() - tRecluster;
   log(`recluster result: ${groups.length} groups (${clusterPinId.size} pinned), avg ${avg.toFixed(1)}, thr ${threshold.toFixed(2)}, ${reclusterMs.toFixed(0)}ms`);
   if (reclusterMs > 500) log(`recluster SLOW: ${reclusterMs.toFixed(0)}ms for ${clusterTabs.length} tabs (${mode})`);
   const currentKeys = new Set(groups.map(groupKey));
   for (const k of customLabels.keys()) if (!currentKeys.has(k)) customLabels.delete(k);
+  if (busyVisible) setPhase("cluster", 0.4, `Naming ${groups.length} groups`);
   if (effectiveAutoApplyNaming()) {
     const tNames = performance.now();
     await assignNames(groups, texts, tabs, embeddings);
     log(`recluster assignNames ${(performance.now() - tNames).toFixed(0)}ms for ${groups.length} groups`);
     updateAppliedSnapshot(groups);
   }
+  if (busyVisible) setPhase("cluster", 1, "Done");
   renderGroups(groups);
   status(statusMsg);
   if (!autoApplying && !skipNextAutoApply) {
@@ -616,7 +671,7 @@ async function recluster({ forceSimilarity = false } = {}) {
         else status(`auto-apply: nothing to change.`);
       }
       catch (e) { console.warn("[arctictab] auto-apply failed", e); }
-      finally { autoApplying = false; }
+      finally { autoApplying = false; await resyncAndRender(groups); }
     } else if (options.autoApplyNaming) {
       autoApplying = true;
       try {
@@ -625,12 +680,30 @@ async function recluster({ forceSimilarity = false } = {}) {
         else status(`auto-apply: nothing to change.`);
       }
       catch (e) { console.warn("[arctictab] auto-apply (no rearrange) failed", e); }
-      finally { autoApplying = false; }
+      finally { autoApplying = false; await resyncAndRender(groups); }
     }
   } else if (skipNextAutoApply) {
     skipNextAutoApply = false;
     log("recluster: skipped one auto-apply");
   }
+}
+
+async function resyncAndRender(groups) {
+  if (!state?.tabs) return;
+  const live = await browser.tabs.query({ currentWindow: true });
+  const liveById = new Map(live.map((t) => [t.id, t]));
+  const survivors = state.tabs.filter((t) => liveById.has(t.id));
+  if (survivors.length !== live.length || survivors.length !== state.tabs.length) {
+    log("resync: tab set changed during apply, scheduling a refresh instead of rendering");
+    scheduleRefresh("apply-resync");
+    return;
+  }
+  for (const t of state.tabs) {
+    const now = liveById.get(t.id);
+    t.index = now.index;
+    t.groupId = now.groupId;
+  }
+  renderGroups(groups);
 }
 
 function updateAppliedSnapshot(groups) {
@@ -756,19 +829,19 @@ function resetRefreshFingerprints() {
 async function refresh({ silent = false, reclusterOpts = {}, force = false } = {}) {
   const id = ++refreshId;
   log(`refresh #${id} start (silent=${silent}, force=${force})`);
-  if (!silent) {
-    status("loading model...");
-    $("#groups").innerHTML = '<div class="placeholder">Loading model and embedding tabs...</div>';
-  }
   const t0 = performance.now();
-  await getExtractor();
-  log(`refresh #${id} model ready in ${(performance.now() - t0).toFixed(0)}ms`);
-
-  if (!silent) status("collecting tabs...");
+  const modelReady = getExtractor();
+  if (!silent) {
+    resetProgress();
+    status("collecting tabs...");
+    showBusy("Collecting tabs", 0);
+    setPhase("tabs", 0, "Collecting tabs");
+  }
   const tabs = await queryTabs();
   log(`refresh #${id} tabs:`, tabs.length);
   if (tabs.length === 0) {
     status("no tabs found in this window");
+    hideBusy();
     $("#groups").innerHTML = '<div class="placeholder">No tabs found.</div>';
     return;
   }
@@ -780,9 +853,13 @@ async function refresh({ silent = false, reclusterOpts = {}, force = false } = {
   }
   lastTabsFingerprint = tabsFp;
 
-  if (!silent) status(`scraping metadata for ${tabs.length} tabs...`);
+  if (!silent) { status(`scraping metadata for ${tabs.length} tabs...`); setPhase("tabs", 1, `Reading ${tabs.length} tabs`); }
   const tMeta = performance.now();
-  const metas = await Promise.all(tabs.map(getMeta));
+  let metasDone = 0;
+  const metas = await Promise.all(tabs.map((t) => getMeta(t).finally(() => {
+    metasDone++;
+    if (!silent) setPhase("meta", metasDone / tabs.length, `Reading ${metasDone}/${tabs.length} tabs`);
+  })));
   const texts = tabs.map((t, i) => buildText(t, metas[i]));
   log(`refresh #${id} metas done in ${(performance.now() - tMeta).toFixed(0)}ms, ${metas.filter(Boolean).length}/${tabs.length} had meta`);
 
@@ -808,6 +885,10 @@ async function refresh({ silent = false, reclusterOpts = {}, force = false } = {
   log(`refresh #${id} cache: ${tabs.length - toEmbedIdx.length} hits, ${toEmbedIdx.length} misses`);
 
   if (toEmbedTexts.length) {
+    await modelReady;
+    log(`refresh #${id} model ready in ${(performance.now() - t0).toFixed(0)}ms`);
+    if (!silent) setPhase("model", 1, "Model ready");
+    if (!silent) setPhase("embed", 0, `Embedding 0/${toEmbedTexts.length} tabs`);
     if (!silent) status(`embedding ${toEmbedTexts.length} tabs...`);
     const batchSize = 16;
     const tEmb = performance.now();
@@ -819,7 +900,11 @@ async function refresh({ silent = false, reclusterOpts = {}, force = false } = {
         embeddings[idx] = embs[j];
         await put(tabs[idx].url, embs[j], texts[idx]);
       }
-      if (!silent) status(`embedded ${Math.min(i + batchSize, toEmbedTexts.length)}/${toEmbedTexts.length}`);
+      const done = Math.min(i + batchSize, toEmbedTexts.length);
+      if (!silent) {
+        status(`embedded ${done}/${toEmbedTexts.length}`);
+        setPhase("embed", done / toEmbedTexts.length, `Embedding ${done}/${toEmbedTexts.length} tabs`);
+      }
     }
     log(`refresh #${id} embedding done in ${(performance.now() - tEmb).toFixed(0)}ms`);
   }
@@ -831,6 +916,8 @@ async function refresh({ silent = false, reclusterOpts = {}, force = false } = {
     return;
   }
 
+  if (!silent) setPhase("model", 1, "Grouping tabs");
+  if (!silent) setPhase("embed", 1, "Grouping tabs");
   state = { tabs, embeddings, texts, lastGroups: null };
   log(`refresh #${id} state set, calling recluster`);
   await recluster(reclusterOpts);
@@ -885,7 +972,7 @@ browser.tabs.onRemoved.addListener((id, removeInfo) => {
 });
 browser.tabs.onMoved.addListener((id, info) => {
   if (isForeignWindow(info?.windowId)) { log("tabs.onMoved ignored (foreign window)", id); return; }
-  log("tabs.onMoved", id, info);
+  log(`tabs.onMoved ${id} ${info.fromIndex}→${info.toIndex} (suppress=${suppressMoveRefresh})`);
   if (suppressMoveRefresh > 0) { log("tabs.onMoved suppressed (self-move)"); return; }
   scheduleRefresh("onMoved");
 });
@@ -911,16 +998,51 @@ browser.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
   } else if (changeInfo.url) {
     lastMeaningfulUrl.set(tabId, meaningfulUrl(changeInfo.url));
   }
+  if (changeInfo.audible !== undefined || changeInfo.mutedInfo) {
+    const row = document.querySelector(`.tab[data-tab-id="${tabId}"]`);
+    const btn = row?.querySelector(".audio-btn");
+    if (btn) applyAudioState(btn, tab.audible, tab.mutedInfo?.muted);
+    const known = state?.tabs?.find((x) => x.id === tabId);
+    if (known) { known.audible = tab.audible; known.mutedInfo = tab.mutedInfo; }
+  }
   if (changeInfo.url || changeInfo.title || changeInfo.status === "complete") {
     log("tabs.onUpdated trigger", tabId, changeInfo);
     scheduleRefresh("onUpdated");
   }
 });
-browser.tabs.onActivated.addListener(({ tabId, windowId }) => {
+const pageHeader = document.querySelector("header");
+console.assert(pageHeader != null, "sidebar must have a sticky header");
+function trackHeaderHeight() {
+  const apply = () => document.documentElement.style.setProperty("--header-h", `${pageHeader.offsetHeight}px`);
+  apply();
+  new ResizeObserver(apply).observe(pageHeader);
+}
+trackHeaderHeight();
+
+function revealActiveTab() {
+  const row = document.querySelector(".tab.active");
+  row?.scrollIntoView({ block: "nearest" });
+}
+
+let lastActivation = null;
+browser.tabs.onActivated.addListener(async ({ tabId, windowId }) => {
   if (isForeignWindow(windowId)) return;
   for (const el of document.querySelectorAll(".tab.active")) el.classList.remove("active");
   const row = document.querySelector(`.tab[data-tab-id="${tabId}"]`);
   if (row) row.classList.add("active");
+  revealActiveTab();
+  try {
+    const strip = await captureStrip();
+    const stripPos = strip.findIndex((t) => t.id === tabId);
+    const rows = [...document.querySelectorAll("#groups .tab")].map((el) => +el.dataset.tabId);
+    const panelPos = rows.indexOf(tabId);
+    const deltas = lastActivation
+      ? `strip ${lastActivation.stripPos}→${stripPos} (${stripPos - lastActivation.stripPos}), panel ${lastActivation.panelPos}→${panelPos} (${panelPos - lastActivation.panelPos})`
+      : "first activation";
+    log(`activated ${shortLabel(strip[stripPos])}: stripPos=${stripPos} panelPos=${panelPos} | ${deltas}`);
+    if (stripPos !== panelPos) log(`activated MISMATCH: panel and strip disagree on position for tab ${tabId}`);
+    lastActivation = { tabId, stripPos, panelPos };
+  } catch (e) { log(`activation logging failed: ${e?.message || e}`); }
 });
 log("tabs.* listeners registered");
 
@@ -1040,6 +1162,62 @@ async function snapshotTabOrder(label, ids) {
   } catch (e) { log(`tab-order [${label}] failed: ${e?.message || e}`); }
 }
 
+function shortLabel(t) {
+  if (!t) return "?";
+  const title = (t.title || t.url || "").slice(0, 24);
+  return `${t.id}:${title}`;
+}
+
+async function captureStrip() {
+  const tabs = (await browser.tabs.query({ currentWindow: true })).sort((a, b) => a.index - b.index);
+  console.assert(tabs.length > 0, "captureStrip saw an empty window");
+  return tabs;
+}
+
+function logStrip(label, tabs) {
+  const active = tabs.find((t) => t.active);
+  log(`strip [${label}]: ${tabs.map((t, i) => `${i}=${shortLabel(t)}`).join(" | ")}`);
+  log(`strip [${label}]: active=${active ? shortLabel(active) : "none"} at index ${active ? active.index : -1}`);
+}
+
+function logStripDelta(label, before, after) {
+  const beforeIdx = new Map(before.map((t, i) => [t.id, i]));
+  const moves = [];
+  after.forEach((t, i) => {
+    const was = beforeIdx.get(t.id);
+    if (was == null) { moves.push(`${shortLabel(t)} new@${i}`); return; }
+    if (was !== i) moves.push(`${shortLabel(t)} ${was}→${i}`);
+  });
+  const activeBefore = before.find((t) => t.active);
+  const activeAfter = after.find((t) => t.active);
+  const activeShift = activeBefore && activeAfter && activeBefore.id === activeAfter.id
+    ? `${beforeIdx.get(activeAfter.id)}→${after.findIndex((t) => t.id === activeAfter.id)}`
+    : "changed-tab";
+  if (!moves.length) { log(`strip-delta [${label}]: no positions changed`); return; }
+  log(`strip-delta [${label}]: ${moves.length}/${after.length} tabs moved: ${moves.join(", ")}`);
+  log(`strip-delta [${label}]: active tab ${activeShift}`);
+}
+
+let lastClusterAssignment = null;
+function logClusterChurn(groups) {
+  const assignment = new Map();
+  groups.forEach((g, gi) => g.forEach((t) => assignment.set(t.id, gi)));
+  log(`clusters: ${groups.map((g, gi) => `#${gi}[${g.map((t) => t.id).join(",")}]`).join(" ")}`);
+  const strippedOrder = groups.map((g) => Math.min(...g.map((t) => t.index)));
+  const monotonic = strippedOrder.every((v, i) => i === 0 || strippedOrder[i - 1] <= v);
+  log(`clusters: array order ${monotonic ? "matches" : "DOES NOT MATCH"} strip order (first-index per cluster: [${strippedOrder.join(",")}])`);
+  if (lastClusterAssignment) {
+    const churn = [];
+    for (const [id, gi] of assignment) {
+      const prev = lastClusterAssignment.get(id);
+      if (prev == null) churn.push(`${id} new→#${gi}`);
+      else if (prev !== gi) churn.push(`${id} #${prev}→#${gi}`);
+    }
+    log(churn.length ? `cluster-churn: ${churn.join(", ")}` : "cluster-churn: none");
+  }
+  lastClusterAssignment = assignment;
+}
+
 async function rearrangeTabs(groups) {
   const ordered = orderTabIdsForStrip(groups);
   log(`rearrange: ${ordered.length} tabs target cluster order`);
@@ -1060,10 +1238,16 @@ async function rearrangeTabs(groups) {
   suppressMoveRefresh++;
   let moved = 0;
   try {
+    const before = await captureStrip();
+    logStrip("rearrange-before", before);
+    log(`rearrange: target order [${ordered.join(",")}]`);
     await ungroupAll(ordered);
+    logStripDelta("rearrange-after-ungroup", before, await captureStrip());
     await browser.tabs.move(ordered, { index: -1 });
     moved = ordered.length;
-    log("rearrange: move completed");
+    const after = await captureStrip();
+    logStrip("rearrange-after", after);
+    logStripDelta("rearrange-move", before, after);
   } catch (e) { console.warn("rearrange failed", e); log(`rearrange error: ${e?.message || e}`); }
   finally { setTimeout(() => { suppressMoveRefresh--; }, 250); }
   return { moved, total: ordered.length };
@@ -1112,9 +1296,13 @@ async function applyTabGroups(groups, { rearrange = true } = {}) {
   // mid-apply.
   suppressMoveRefresh++;
   try {
+    const stripBeforeSync = await captureStrip();
+    log(`apply-groups: plan ungroup=[${plan.ungroup.join(",")}] group=${plan.group.map((r) => `[${r.tabIds.join(",")}]`).join(" ")}`);
+    log(`apply-groups: ${groups.length} clusters, ${plan.group.length} eligible as native groups (rest stay loose)`);
     if (plan.ungroup.length) {
       log(`apply-groups: ungrouping ${plan.ungroup.length} tabs no longer in a contiguous group`);
       await ungroupAll(plan.ungroup);
+      logStripDelta("apply-groups-after-ungroup", stripBeforeSync, await captureStrip());
     }
     for (const { tabIds: ids } of plan.group) {
       const label = labelFor(groupByTabId.get(ids[0]));
@@ -1141,17 +1329,28 @@ async function applyTabGroups(groups, { rearrange = true } = {}) {
       }
 
       try {
+        const beforeGroupCall = await captureStrip();
         const gid = await browser.tabs.group({ tabIds: ids });
         await browser.tabGroups.update(gid, { title: label });
+        logStripDelta(`apply-groups-group "${label}"`, beforeGroupCall, await captureStrip());
         grouped++;
       } catch (e) {
         console.warn("tab grouping failed for", label, e);
       }
     }
   } finally {
+    logStrip("apply-groups-end", await captureStrip());
     setTimeout(() => { suppressMoveRefresh--; }, 500);
   }
   return { moved, total, grouped };
+}
+
+function applyAudioState(btn, audible, muted) {
+  const show = !!audible || !!muted;
+  btn.classList.toggle("hidden", !show);
+  btn.classList.toggle("muted", !!muted);
+  btn.textContent = muted ? "\u{1F507}" : "\u{1F50A}";
+  btn.title = muted ? "Unmute tab" : "Mute tab";
 }
 
 function createTabRow(t, containingGroup) {
@@ -1217,6 +1416,14 @@ function createTabRow(t, containingGroup) {
     e.stopPropagation();
     await togglePinTab(t.id, containingGroup);
   });
+  const audioBtn = document.createElement("button");
+  audioBtn.className = "t-btn audio-btn";
+  applyAudioState(audioBtn, t.audible, t.mutedInfo?.muted);
+  audioBtn.addEventListener("click", async (e) => {
+    e.stopPropagation();
+    const live = await browser.tabs.get(t.id);
+    await browser.tabs.update(t.id, { muted: !live.mutedInfo?.muted });
+  });
   const closeTabBtn = document.createElement("button");
   closeTabBtn.className = "t-btn";
   closeTabBtn.title = "Close tab";
@@ -1229,6 +1436,7 @@ function createTabRow(t, containingGroup) {
   row.appendChild(titleSpan);
   row.appendChild(hostSpan);
   row.appendChild(pinBtn);
+  row.appendChild(audioBtn);
   row.appendChild(closeTabBtn);
   row.addEventListener("click", () => browser.tabs.update(t.id, { active: true }));
   return row;
@@ -1295,6 +1503,7 @@ function createGroupCard(tabsInGroup, { label, getCurrentLabel, onRename, onBook
 }
 
 function renderGroups(groups) {
+  hideBusy();
   const main = $("#groups");
   main.innerHTML = "";
   main.appendChild(createTopDropZone());
@@ -1305,6 +1514,28 @@ function renderGroups(groups) {
     renderLiveView(main, groups);
   }
   updateCountsDisplay();
+  revealActiveTab();
+  logRenderedPanel(frozen);
+}
+
+async function logRenderedPanel(frozen) {
+  try {
+    const strip = await captureStrip();
+    const posById = new Map(strip.map((t, i) => [t.id, i]));
+    const blocks = [];
+    for (const block of $("#groups").children) {
+      const rows = [...block.querySelectorAll(".tab")].map((el) => +el.dataset.tabId);
+      if (!rows.length) continue;
+      const header = block.querySelector(".group-header h3");
+      const kind = header ? `card "${header.textContent}"` : "LOOSE(no header)";
+      blocks.push(`${kind} rows=[${rows.map((id) => `${id}@${posById.has(id) ? posById.get(id) : "gone"}`).join(",")}]`);
+    }
+    log(`rendered panel (${frozen ? "frozen" : "live"}): ${blocks.join("  ||  ")}`);
+    const order = [...$("#groups").querySelectorAll(".tab")].map((el) => posById.get(+el.dataset.tabId));
+    const monotonic = order.every((v, i) => i === 0 || (v != null && order[i - 1] != null && order[i - 1] < v));
+    log(`rendered panel: order ${monotonic ? "mirrors" : "DOES NOT MIRROR"} the strip [${order.join(",")}]`);
+
+  } catch (e) { log(`panel logging failed: ${e?.message || e}`); }
 }
 
 function createTopDropZone() {
@@ -1602,12 +1833,18 @@ async function runSearch(q) {
   }
 }
 
-function updateSearchSelection(delta) {
+function setSearchSelection(idx) {
   if (!searchCurrent.length) return;
-  searchSelIdx = (searchSelIdx + delta + searchCurrent.length) % searchCurrent.length;
+  console.assert(idx >= 0 && idx < searchCurrent.length, "search selection index out of range");
+  searchSelIdx = idx;
   const nodes = searchResults.querySelectorAll(".search-result");
   nodes.forEach((n, i) => n.classList.toggle("selected", i === searchSelIdx));
   nodes[searchSelIdx]?.scrollIntoView({ block: "nearest" });
+}
+
+function updateSearchSelection(delta) {
+  if (!searchCurrent.length) return;
+  setSearchSelection((searchSelIdx + delta + searchCurrent.length) % searchCurrent.length);
 }
 
 async function activateSearchTab(tab) {
@@ -1648,6 +1885,8 @@ searchInput.addEventListener("input", () => {
 searchInput.addEventListener("keydown", (e) => {
   if (e.key === "ArrowDown") { e.preventDefault(); updateSearchSelection(1); }
   else if (e.key === "ArrowUp") { e.preventDefault(); updateSearchSelection(-1); }
+  else if (e.key === "Home" && searchCurrent.length) { e.preventDefault(); setSearchSelection(0); }
+  else if (e.key === "End" && searchCurrent.length) { e.preventDefault(); setSearchSelection(searchCurrent.length - 1); }
   else if (e.key === "Enter") { e.preventDefault(); if (searchSelIdx >= 0) activateSearchTab(searchCurrent[searchSelIdx]); }
   else if (e.key === "Escape") { e.preventDefault(); closeSearch(); }
 });
@@ -1657,6 +1896,10 @@ document.addEventListener("mousedown", (e) => {
 }, true);
 
 log("sidebar.js loaded, calling initial refresh");
+const tPreload = performance.now();
+getExtractor()
+  .then(() => log(`model preload ready in ${(performance.now() - tPreload).toFixed(0)}ms`))
+  .catch((e) => log(`model preload failed: ${e?.message || e}`));
 refreshing = true;
 Promise.all([loadOptions(), loadPins()])
   .catch((e) => console.warn("[arctictab] init load failed", e))

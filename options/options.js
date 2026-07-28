@@ -8,8 +8,10 @@ const ANCHOR_INDICES = [1, 2, 3];
 
 const $ = (s) => document.querySelector(s);
 const excludePinned = $("#excludePinned");
-const groupBySimilarity = $("#groupBySimilarity");
 const reorganizeGroups = $("#reorganizeGroups");
+const groupIdenticalTogether = $("#groupIdenticalTogether");
+const identicalOwnGroup = $("#identicalOwnGroup");
+const identicalOwnGroupHint = $("#identicalOwnGroupHint");
 const hideApplyGroups = $("#hideApplyGroups");
 const hideRearrange = $("#hideRearrange");
 const hideGroupCount = $("#hideGroupCount");
@@ -19,6 +21,7 @@ const autoApplyGroups = $("#autoApplyGroups");
 const autoApplyNaming = $("#autoApplyNaming");
 const autoApplyNamingHint = $("#autoApplyNamingDisabledHint");
 const hideApplyGroupsHint = $("#hideApplyGroupsDisabledHint");
+const hideRearrangeHint = $("#hideRearrangeDisabledHint");
 const nameStyle = $("#nameStyle");
 const usePinning = $("#usePinning");
 const useBookmark = $("#useBookmark");
@@ -50,6 +53,11 @@ function updateDisabledStates() {
   autoApplyNamingHint.textContent = "(uncheck \"Auto-organize tabs\" to use this setting)";
   autoApplyNamingHint.classList.toggle("show", namingForced);
 
+  hideRearrange.disabled = namingForced;
+  hideRearrange.closest("label").classList.toggle("disabled", namingForced);
+  hideRearrangeHint.textContent = "(the button is already hidden by \"Auto-organize tabs\")";
+  hideRearrangeHint.classList.toggle("show", namingForced);
+
   const effectiveAutoApplyNaming = namingForced || autoApplyNaming.checked;
   hideApplyGroups.disabled = effectiveAutoApplyNaming;
   hideApplyGroups.closest("label").classList.toggle("disabled", effectiveAutoApplyNaming);
@@ -60,6 +68,11 @@ function updateDisabledStates() {
   } else {
     hideApplyGroupsHint.classList.remove("show");
   }
+
+  const identicalOff = !groupIdenticalTogether.checked;
+  identicalOwnGroup.disabled = identicalOff;
+  identicalOwnGroup.closest("label").classList.toggle("disabled", identicalOff);
+  identicalOwnGroupHint.classList.toggle("show", identicalOff);
 
   const pinningOff = !usePinning.checked;
   for (const [chk, hint] of [
@@ -93,8 +106,9 @@ async function load() {
   const r = await browser.storage.local.get(OPTIONS_KEY);
   const v = { ...DEFAULTS, ...(r[OPTIONS_KEY] || {}) };
   excludePinned.checked = !!v.excludePinned;
-  groupBySimilarity.checked = !!v.groupBySimilarity;
   reorganizeGroups.checked = !!v.reorganizeGroups;
+  groupIdenticalTogether.checked = !!v.groupIdenticalTogether;
+  identicalOwnGroup.checked = !!v.identicalOwnGroup;
   hideApplyGroups.checked = !!v.hideApplyGroups;
   hideRearrange.checked = !!v.hideRearrange;
   hideGroupCount.checked = !!v.hideGroupCount;
@@ -122,8 +136,9 @@ async function save() {
   await browser.storage.local.set({
     [OPTIONS_KEY]: {
       excludePinned: excludePinned.checked,
-      groupBySimilarity: groupBySimilarity.checked,
       reorganizeGroups: reorganizeGroups.checked,
+      groupIdenticalTogether: groupIdenticalTogether.checked,
+      identicalOwnGroup: identicalOwnGroup.checked,
       hideApplyGroups: hideApplyGroups.checked,
       hideRearrange: hideRearrange.checked,
       hideGroupCount: hideGroupCount.checked,
@@ -158,8 +173,9 @@ function onChangeRefresh() {
 }
 
 excludePinned.addEventListener("change", save);
-groupBySimilarity.addEventListener("change", save);
 reorganizeGroups.addEventListener("change", save);
+groupIdenticalTogether.addEventListener("change", save);
+identicalOwnGroup.addEventListener("change", save);
 hideApplyGroups.addEventListener("change", save);
 hideRearrange.addEventListener("change", save);
 hideGroupCount.addEventListener("change", save);

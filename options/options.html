@@ -9,7 +9,8 @@
   </head>
   <body>
     <main>
-      <h1>arctictab</h1>
+      <h1><img class="title-icon" src="../icons/icon-48.png" alt="" /> arctictab</h1>
+      <p class="hint tagline">Flexible tab grouping and fast search using local embedding model.</p>
       <section>
         <label>
           <input type="checkbox" id="excludePinned" />
@@ -62,10 +63,18 @@
       </section>
       <section>
         <label>
-          <input type="checkbox" id="groupBySimilarity" />
-          New tabs put at end of most similar group
+          <input type="checkbox" id="groupIdenticalTogether" />
+          Same tab URL or title always group together
         </label>
-        <p class="hint">Clusters by content across the whole tab strip, ignoring current position. Identical or near-identical pages cluster together, and non-groupable tabs (about:newtab, about:debugging, etc.) sit at the end of whichever cluster they best match. When off, the original position-preserving algorithm is used.</p>
+        <p class="hint">Tabs sharing a URL or a title are always placed in the same group, however many there are. They are also left out of the group-size math entirely, so a pile of identical tabs (a stack of new tabs, say) cannot skew "Control group size" or its penalties for everything else.</p>
+      </section>
+      <section>
+        <label>
+          <input type="checkbox" id="identicalOwnGroup" />
+          Identical tabs always get their own group
+          <span id="identicalOwnGroupHint" class="inline-hint">(enable "Same tab URL or title always group together" to use this setting)</span>
+        </label>
+        <p class="hint">Keep identical tabs in a group of their own rather than letting them join the group they most resemble. When off, other tabs can end up alongside them.</p>
       </section>
       <section>
         <label>
@@ -79,7 +88,7 @@
           <input type="checkbox" id="autoApplyGroups" />
           Auto-organize tabs
         </label>
-        <p class="hint">Re-apply groups (rearranging the tab strip and creating Firefox tab groups) automatically every time the cluster recomputes.</p>
+        <p class="hint">Moves tabs. Clusters by content across the whole tab strip rather than by position, then rearranges the strip and creates Firefox tab groups automatically every time the clustering recomputes. Matching pages end up together no matter where they were opened. When off, tabs are never moved on their own and groups follow the existing strip order. While on, the sidebar's "Re-organize tabs" button is hidden, since pressing it would only repeat what already happens on every recompute.</p>
       </section>
       <section id="autoApplyNamingSection">
         <label>
@@ -100,6 +109,7 @@
         <label>
           <input type="checkbox" id="hideRearrange" />
           Hide "Re-organize tabs" button
+          <span id="hideRearrangeDisabledHint" class="inline-hint"></span>
         </label>
       </section>
       <section>
@@ -143,22 +153,6 @@
           Hide "Control group size" checkbox
         </label>
         <p class="hint">When hidden, control group size stays off and the size sliders are unavailable.</p>
-      </section>
-      <section>
-        <details>
-          <summary>Hide Firefox's native tab strip</summary>
-          <p class="hint">Firefox extensions can't hide the top tab strip directly. To rely only on the arctictab sidebar, edit your Firefox profile's <code>userChrome.css</code>:</p>
-          <ol class="hint steps">
-            <li>Open <code>about:config</code> and set <code>toolkit.legacyUserProfileCustomizations.stylesheets</code> to <b>true</b>.</li>
-            <li>Open <code>about:profiles</code> and click <b>Open Folder</b> next to your current profile's Root Directory.</li>
-            <li>Inside that folder, create a subfolder named <code>chrome</code> if it doesn't exist.</li>
-            <li>Inside <code>chrome/</code>, create or edit <code>userChrome.css</code> and add:
-              <pre><code>#TabsToolbar { visibility: collapse !important; }</code></pre>
-            </li>
-            <li>Restart Firefox.</li>
-          </ol>
-          <p class="hint">To restore the tab strip, remove that rule (or set the <code>about:config</code> pref back to <b>false</b>) and restart.</p>
-        </details>
       </section>
       <section>
         <label>
