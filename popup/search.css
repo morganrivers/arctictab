@@ -28,8 +28,15 @@ body {
   padding: 10px;
   gap: 8px;
 }
+#bar {
+  display: flex;
+  gap: 6px;
+  align-items: stretch;
+  min-width: 0;
+}
 #q {
-  width: 100%;
+  flex: 1 1 auto;
+  min-width: 0;
   padding: 8px 10px;
   font-size: 15px;
   border: 1px solid var(--border);
@@ -39,6 +46,17 @@ body {
   outline: none;
 }
 #q:focus { border-color: var(--accent); }
+#open-sidebar {
+  flex: 0 0 auto;
+  padding: 0 12px;
+  font: inherit;
+  color: var(--fg);
+  background: var(--muted);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  cursor: pointer;
+}
+#open-sidebar:hover { border-color: var(--accent); }
 #results {
   list-style: none;
   margin: 0;

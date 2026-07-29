@@ -5,7 +5,10 @@
     <link rel="stylesheet" href="search.css" />
   </head>
   <body>
-    <input id="q" type="text" placeholder="Search tabs" autocomplete="off" spellcheck="false" autofocus />
+    <div id="bar">
+      <input id="q" type="text" placeholder="Search tabs" autocomplete="off" spellcheck="false" autofocus />
+      <button id="open-sidebar" type="button" title="Open the arctictab sidebar">Sidebar</button>
+    </div>
     <ul id="results" role="listbox"></ul>
     <script type="module" src="search.js"></script>
   </body>

@@ -20,6 +20,7 @@ initTheme();
 
 const input = document.getElementById("q");
 const resultsEl = document.getElementById("results");
+const sidebarBtn = document.getElementById("open-sidebar");
 
 let windowId = null;
 const windowReady = resolveWindowId(null).then((id) => { windowId = id; return id; });
@@ -117,8 +118,17 @@ input.addEventListener("keydown", (e) => {
 input.addEventListener("focus", () => dev.log("input focus", focusState()));
 input.addEventListener("blur", () => dev.log("input blur", focusState()));
 
+sidebarBtn.addEventListener("click", () => {
+  browser.sidebarAction.open().catch((e) => dev.log("sidebar open failed", String(e?.message || e)));
+  window.close();
+});
+
 window.addEventListener("focus", () => input.focus());
-document.addEventListener("keydown", () => { if (document.activeElement !== input) input.focus(); }, true);
+document.addEventListener("keydown", (e) => {
+  if (document.activeElement === input || document.activeElement === sidebarBtn) return;
+  if (e.key === "Tab") return;
+  input.focus();
+}, true);
 
 windowReady
   .then(async () => {

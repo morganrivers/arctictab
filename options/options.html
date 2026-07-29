@@ -24,7 +24,7 @@
           <input type="checkbox" id="showSearchBar" />
           Show tab search bar in sidebar
         </label>
-        <p class="hint">A search box at the top of the sidebar for jumping to an open tab. Ranks matches with the on-device embedding model blended with keyword (BM25) matching. When hidden, the keyboard shortcut still opens it.</p>
+        <p class="hint">A search box at the top of the sidebar for jumping to an open tab. Ranks matches with the on-device embedding model blended with keyword (BM25) matching. The keyboard shortcut below opens the same search as a toolbar panel, whether or not this box is shown.</p>
         <label>
           Keyboard shortcut
           <input type="text" id="searchShortcut" placeholder="Ctrl+Shift+F" autocomplete="off" spellcheck="false" />
@@ -34,6 +34,7 @@
           <button type="button" id="searchShortcutReset">Reset to Ctrl+Shift+F</button>
         </div>
         <p class="hint">Suggestions: <b>Ctrl+Shift+F</b>, <b>Ctrl+Shift+Space</b>, or <b>Alt+Shift+T</b>. Combine modifiers (Ctrl, Alt, Shift) with a letter or key.</p>
+        <p class="hint">The toolbar button opens this same search panel. Its "Sidebar" button opens the arctictab sidebar.</p>
         <p id="shortcutStatus" class="hint"></p>
       </section>
       <section>
