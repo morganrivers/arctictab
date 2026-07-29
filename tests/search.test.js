@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { tokenize, buildBm25, scoreBm25, cosineSim, rankTabs } from "../lib/search.js";
+import { tokenize, buildBm25, scoreBm25, cosineSim, rankTabs, prefixTerms } from "../lib/search.js";
 
 const DOCS = [
   "sourdough bread recipe baking",
@@ -38,6 +38,31 @@ test("rankTabs returns lexical matches without embeddings", () => {
   const ranked = rankTabs({ bm25Index: index, embeddings: null, query: "sourdough" });
   const idxs = ranked.map((r) => r.index).sort();
   assert.deepEqual(idxs, [0, 3]);
+});
+
+test("prefixTerms finds the vocabulary slice sharing a prefix", () => {
+  const index = buildBm25(["claude clang clay", "python"]);
+  assert.deepEqual(prefixTerms(index, "cla"), ["clang", "claude", "clay"]);
+  assert.deepEqual(prefixTerms(index, "clau"), ["claude"]);
+  assert.deepEqual(prefixTerms(index, "zz"), []);
+});
+
+test("a partial last word matches tabs by prefix", () => {
+  const index = buildBm25(["claude assistant", "python pandas", "sourdough"]);
+  const ranked = rankTabs({ bm25Index: index, query: "cla" });
+  assert.deepEqual(ranked.map((r) => r.index), [0]);
+});
+
+test("earlier query words are not prefix expanded", () => {
+  const index = buildBm25(["claude assistant", "clay pottery"]);
+  const ranked = rankTabs({ bm25Index: index, query: "cla pottery" });
+  assert.deepEqual(ranked.map((r) => r.index), [1]);
+});
+
+test("an exact match outranks a prefix match of equal rarity", () => {
+  const index = buildBm25(["cat", "category"]);
+  const ranked = rankTabs({ bm25Index: index, query: "cat" });
+  assert.deepEqual(ranked.map((r) => r.index), [0, 1]);
 });
 
 test("rankTabs empty query returns nothing", () => {
