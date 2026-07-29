@@ -37,6 +37,19 @@
         <p id="shortcutStatus" class="hint"></p>
       </section>
       <section>
+        <h2>Close group</h2>
+        <label>
+          Keyboard shortcut
+          <input type="text" id="closeGroupShortcut" placeholder="Alt+W" autocomplete="off" spellcheck="false" />
+        </label>
+        <div class="row-btns">
+          <button type="button" id="closeGroupShortcutSave">Set shortcut</button>
+          <button type="button" id="closeGroupShortcutReset">Reset to Alt+W</button>
+        </div>
+        <p class="hint">Closes every tab in the group the current tab belongs to. Does nothing when the current tab is not in a group. If that group is all the window holds, the window closes with it.</p>
+        <p id="closeGroupShortcutStatus" class="hint"></p>
+      </section>
+      <section>
         <h2>Pinning</h2>
         <label>
           <input type="checkbox" id="usePinning" />

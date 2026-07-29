@@ -27,11 +27,16 @@
     "type": "module"
   },
   "commands": {
-    "search-tabs": {
+    "_execute_action": {
       "suggested_key": {
         "default": "Ctrl+Shift+F"
+      }
+    },
+    "close-group": {
+      "suggested_key": {
+        "default": "Alt+W"
       },
-      "description": "Search open tabs"
+      "description": "Close the group the current tab is in"
     }
   },
   "sidebar_action": {
@@ -41,7 +46,8 @@
   },
   "action": {
     "default_title": "Open arctictab",
-    "default_icon": "icons/icon-48.png"
+    "default_icon": "icons/icon-48.png",
+    "default_popup": "popup/search.html"
   },
   "options_ui": {
     "page": "options/options.html",

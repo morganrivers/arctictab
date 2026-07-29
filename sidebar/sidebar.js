@@ -7,7 +7,7 @@ import { orderTabIdsForStrip, planGroupSync, mirrorLayout } from "../lib/taborde
 import { querySearch, resolveWindowId } from "../lib/searchclient.js";
 import { TRANSPARENT_PX, faviconUrlFor } from "../lib/favicon.js";
 import { debugLog, isDebugEnabled, onDebugChange } from "../lib/log.js";
-import { createDevLogger } from "../lib/devlog.js";
+import { createDevLogger, captureGlobalErrors } from "../lib/devlog.js";
 import { OPTIONS_KEY, DEFAULT_AUTO_ANCHORS, OPTIONS_DEFAULTS } from "../lib/options.js";
 
 initTheme();
@@ -739,6 +739,7 @@ async function assignNames(groups, texts, tabs, embeddings) {
 
 const dev = createDevLogger("sidebar");
 const log = dev.log;
+captureGlobalErrors(dev);
 
 function groupCentroid(group, tabIdxById, embeddings) {
   const dim = embeddings[0].length;
@@ -1731,7 +1732,7 @@ async function refreshSearchPlaceholder() {
   let shortcut = "";
   try {
     const cmds = await browser.commands.getAll();
-    shortcut = cmds.find((c) => c.name === "search-tabs")?.shortcut || "";
+    shortcut = cmds.find((c) => c.name === "_execute_action")?.shortcut || "";
   } catch (e) {
     console.warn("[arctictab] read shortcut failed", e);
   }

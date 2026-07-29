@@ -17,7 +17,7 @@
   --active-border: #6a6a78;
 }
 * { box-sizing: border-box; }
-html, body { height: 100%; }
+html, body { width: 560px; height: 420px; overflow: hidden; }
 body {
   margin: 0;
   font: 13px system-ui, sans-serif;
@@ -44,7 +44,9 @@ body {
   margin: 0;
   padding: 0;
   overflow-y: auto;
+  overflow-x: hidden;
   flex: 1;
+  min-height: 0;
 }
 .result {
   display: flex;
@@ -53,6 +55,7 @@ body {
   padding: 6px 8px;
   border-radius: 4px;
   cursor: pointer;
+  min-width: 0;
 }
 .result .favicon {
   width: 16px;
@@ -64,9 +67,19 @@ body {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  flex: 1;
+  flex: 1 1 auto;
+  min-width: 0;
 }
-.result .r-host { opacity: 0.55; font-size: 11px; white-space: nowrap; }
+.result .r-host {
+  opacity: 0.55;
+  font-size: 11px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 40%;
+}
 .result:hover { background: var(--muted); }
 .result.selected { background: var(--active-bg); box-shadow: inset 0 0 0 1px var(--active-border); }
 .empty { padding: 10px 8px; opacity: 0.6; }

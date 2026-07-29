@@ -203,45 +203,62 @@ for (const a of anchorInputs) {
   a.groups.addEventListener("change", save);
 }
 
-const SEARCH_COMMAND = "search-tabs";
-const searchShortcut = $("#searchShortcut");
-const searchShortcutSave = $("#searchShortcutSave");
-const searchShortcutReset = $("#searchShortcutReset");
-const shortcutStatus = $("#shortcutStatus");
+function bindShortcutEditor({ command, defaultShortcut, input, saveBtn, resetBtn, status }) {
+  const field = $(input);
+  const statusEl = $(status);
+  console.assert(field && statusEl, `shortcut editor needs ${input} and ${status}`);
 
-async function loadShortcut() {
-  try {
-    const cmds = await browser.commands.getAll();
-    const cmd = cmds.find((c) => c.name === SEARCH_COMMAND);
-    searchShortcut.value = cmd?.shortcut || "";
-  } catch (e) {
-    shortcutStatus.textContent = "Shortcut API unavailable: " + (e?.message || e);
+  async function loadShortcut() {
+    try {
+      const cmds = await browser.commands.getAll();
+      field.value = cmds.find((c) => c.name === command)?.shortcut || "";
+    } catch (e) {
+      statusEl.textContent = "Shortcut API unavailable: " + (e?.message || e);
+    }
   }
+
+  async function saveShortcut() {
+    const shortcut = field.value.trim();
+    try {
+      await browser.commands.update({ name: command, shortcut });
+      statusEl.textContent = shortcut ? `Shortcut set to ${shortcut}.` : "Shortcut cleared.";
+    } catch (e) {
+      statusEl.textContent = "Invalid shortcut: " + (e?.message || e);
+    }
+  }
+
+  async function resetShortcut() {
+    try {
+      await browser.commands.reset(command);
+      await loadShortcut();
+      statusEl.textContent = `Shortcut reset to ${defaultShortcut}.`;
+    } catch (e) {
+      statusEl.textContent = "Reset failed: " + (e?.message || e);
+    }
+  }
+
+  $(saveBtn).addEventListener("click", saveShortcut);
+  $(resetBtn).addEventListener("click", resetShortcut);
+  loadShortcut();
 }
 
-async function saveShortcut() {
-  const shortcut = searchShortcut.value.trim();
-  try {
-    await browser.commands.update({ name: SEARCH_COMMAND, shortcut });
-    shortcutStatus.textContent = shortcut ? `Shortcut set to ${shortcut}.` : "Shortcut cleared.";
-  } catch (e) {
-    shortcutStatus.textContent = "Invalid shortcut: " + (e?.message || e);
-  }
-}
+bindShortcutEditor({
+  command: "_execute_action",
+  defaultShortcut: "Ctrl+Shift+F",
+  input: "#searchShortcut",
+  saveBtn: "#searchShortcutSave",
+  resetBtn: "#searchShortcutReset",
+  status: "#shortcutStatus",
+});
 
-async function resetShortcut() {
-  try {
-    await browser.commands.reset(SEARCH_COMMAND);
-    await loadShortcut();
-    shortcutStatus.textContent = "Shortcut reset to Ctrl+Shift+F.";
-  } catch (e) {
-    shortcutStatus.textContent = "Reset failed: " + (e?.message || e);
-  }
-}
-
-searchShortcutSave.addEventListener("click", saveShortcut);
-searchShortcutReset.addEventListener("click", resetShortcut);
-loadShortcut();
+bindShortcutEditor({
+  command: "close-group",
+  defaultShortcut: "Alt+W",
+  input: "#closeGroupShortcut",
+  saveBtn: "#closeGroupShortcutSave",
+  resetBtn: "#closeGroupShortcutReset",
+  status: "#closeGroupShortcutStatus",
+});
 
 load().catch((e) => {
   console.error(e);

@@ -1,18 +1,28 @@
 import { initTheme } from "../lib/theme.js";
-import { createDevLogger } from "../lib/devlog.js";
+import { createDevLogger, captureGlobalErrors } from "../lib/devlog.js";
 import { TRANSPARENT_PX, faviconUrlFor } from "../lib/favicon.js";
 import { querySearch, resolveWindowId } from "../lib/searchclient.js";
 
 const dev = createDevLogger("popup");
-dev.log("popup start", location.search);
+captureGlobalErrors(dev);
+
+const focusState = () => JSON.stringify({
+  hasFocus: document.hasFocus(),
+  active: document.activeElement?.id || document.activeElement?.tagName || "",
+});
+dev.log("popup start", "loadMs=", Math.round(performance.now()), "focus=", focusState());
+for (const at of [50, 150, 400]) setTimeout(() => dev.log("popup focus@", at, focusState()), at);
+window.addEventListener("focus", () => dev.log("window focus", focusState()));
+window.addEventListener("blur", () => dev.log("window blur", focusState()));
+window.addEventListener("keydown", (e) => dev.log("popup key", e.key, focusState()), { once: true });
 
 initTheme();
 
-const params = new URLSearchParams(location.search);
 const input = document.getElementById("q");
 const resultsEl = document.getElementById("results");
 
 let windowId = null;
+const windowReady = resolveWindowId(null).then((id) => { windowId = id; return id; });
 let seq = 0;
 let debounce = null;
 let selIdx = -1;
@@ -57,6 +67,7 @@ async function run(query) {
   const mySeq = ++seq;
   const t0 = performance.now();
   let done = false;
+  await windowReady;
   if (query) {
     querySearch({ windowId, query, semantic: false })
       .then((tabs) => { if (mySeq === seq && !done) render(tabs); })
@@ -103,18 +114,17 @@ input.addEventListener("keydown", (e) => {
   else if (e.key === "Enter") { e.preventDefault(); if (selIdx >= 0) activate(current[selIdx]); }
   else if (e.key === "Escape") { e.preventDefault(); window.close(); }
 });
-let blurArmed = false;
-setTimeout(() => { blurArmed = true; }, 500);
-window.addEventListener("blur", () => {
-  if (!blurArmed) return;
-  setTimeout(() => { if (!document.hasFocus()) { dev.log("popup close on sustained blur"); window.close(); } }, 250);
-});
+input.addEventListener("focus", () => dev.log("input focus", focusState()));
+input.addEventListener("blur", () => dev.log("input blur", focusState()));
 
-resolveWindowId(params.has("win") ? Number(params.get("win")) : null)
-  .then(async (id) => {
-    windowId = id;
+window.addEventListener("focus", () => input.focus());
+document.addEventListener("keydown", () => { if (document.activeElement !== input) input.focus(); }, true);
+
+windowReady
+  .then(async () => {
     input.focus();
-    await run("");
+    dev.log("popup ready", "ms=", Math.round(performance.now()), "focus=", focusState(), "typedAhead=", JSON.stringify(input.value));
+    await run(input.value.trim());
   })
   .catch((e) => {
     dev.log("popup load FAILED", String(e?.message || e));
