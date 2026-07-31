@@ -1,10 +1,9 @@
 import { initTheme } from "../lib/theme.js";
-import { OPTIONS_KEY, DEFAULT_AUTO_ANCHORS, OPTIONS_DEFAULTS as DEFAULTS } from "../lib/options.js";
+import { OPTIONS_KEY, OPTIONS_DEFAULTS as DEFAULTS } from "../lib/options.js";
 
 initTheme();
 
 const SLIDERS = ["headSim", "curatedSim", "keywordFrac"];
-const ANCHOR_INDICES = [1, 2, 3];
 
 const $ = (s) => document.querySelector(s);
 const excludePinned = $("#excludePinned");
@@ -36,11 +35,10 @@ const debugLogging = $("#debugLogging");
 const autoPinTabHint = $("#autoPinTabHint");
 const autoPinGroupHint = $("#autoPinGroupHint");
 const status = $("#status");
+const groupingRulesList = $("#groupingRulesList");
+const addGroupingRule = $("#addGroupingRule");
+let groupingRules = [];
 const sliders = Object.fromEntries(SLIDERS.map((k) => [k, $("#" + k)]));
-const anchorInputs = ANCHOR_INDICES.map((i) => ({
-  tabs: $("#anchorTabs" + i),
-  groups: $("#anchorGroups" + i),
-}));
 
 function showSlider(k) {
   $("#" + k + "-val").textContent = (+sliders[k].value).toFixed(2);
@@ -86,21 +84,53 @@ function updateDisabledStates() {
   }
 }
 
-function readAnchors() {
-  return anchorInputs.map((a) => ({
-    tabs: Math.max(1, Math.round(+a.tabs.value) || 0),
-    groups: Math.max(1, Math.round(+a.groups.value) || 0),
-  })).filter((a) => a.tabs > 0 && a.groups > 0);
+function renderGroupingRules() {
+  groupingRulesList.innerHTML = "";
+  groupingRules.forEach((rule, i) => {
+    const row = document.createElement("div");
+    row.className = "grouping-rule-row";
+
+    const field = document.createElement("select");
+    field.innerHTML = `<option value="domain">Domain contains</option><option value="title">Title contains</option>`;
+    field.value = rule.field === "title" ? "title" : "domain";
+    field.addEventListener("change", () => { groupingRules[i].field = field.value; save(); });
+
+    const pattern = document.createElement("input");
+    pattern.type = "text";
+    pattern.placeholder = "mail|gmail|outlook";
+    pattern.autocomplete = "off";
+    pattern.spellcheck = false;
+    pattern.value = rule.pattern || "";
+    pattern.addEventListener("change", () => { groupingRules[i].pattern = pattern.value.trim(); save(); });
+
+    const name = document.createElement("input");
+    name.type = "text";
+    name.placeholder = "Group name (e.g. Mail)";
+    name.autocomplete = "off";
+    name.spellcheck = false;
+    name.value = rule.name || "";
+    name.addEventListener("change", () => { groupingRules[i].name = name.value.trim(); save(); });
+
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.className = "rule-remove";
+    remove.textContent = "✕";
+    remove.setAttribute("aria-label", "Remove rule");
+    remove.addEventListener("click", () => {
+      groupingRules.splice(i, 1);
+      renderGroupingRules();
+      save();
+    });
+
+    row.append(field, pattern, name, remove);
+    groupingRulesList.appendChild(row);
+  });
 }
 
-function writeAnchors(anchors) {
-  const list = (anchors && anchors.length ? anchors : DEFAULT_AUTO_ANCHORS);
-  for (let i = 0; i < anchorInputs.length; i++) {
-    const a = list[i] || DEFAULT_AUTO_ANCHORS[i];
-    anchorInputs[i].tabs.value = String(a.tabs);
-    anchorInputs[i].groups.value = String(a.groups);
-  }
-}
+addGroupingRule.addEventListener("click", () => {
+  groupingRules.push({ field: "domain", pattern: "", name: "" });
+  renderGroupingRules();
+});
 
 async function load() {
   const r = await browser.storage.local.get(OPTIONS_KEY);
@@ -128,7 +158,8 @@ async function load() {
   debugLogging.checked = !!v.debugLogging;
   nameStyle.value = v.nameStyle;
   for (const k of SLIDERS) { sliders[k].value = String(v[k]); showSlider(k); }
-  writeAnchors(v.autoGroupAnchors);
+  groupingRules = (v.groupingRules || []).map((r) => ({ field: r.field === "title" ? "title" : "domain", pattern: r.pattern || "", name: r.name || "" }));
+  renderGroupingRules();
   updateDisabledStates();
 }
 
@@ -160,7 +191,7 @@ async function save() {
       headSim: +sliders.headSim.value,
       curatedSim: +sliders.curatedSim.value,
       keywordFrac: +sliders.keywordFrac.value,
-      autoGroupAnchors: readAnchors(),
+      groupingRules: groupingRules.filter((r) => r.pattern),
     },
   });
   status.textContent = "Saved.";
@@ -197,10 +228,6 @@ nameStyle.addEventListener("change", save);
 for (const k of SLIDERS) {
   sliders[k].addEventListener("input", () => showSlider(k));
   sliders[k].addEventListener("change", save);
-}
-for (const a of anchorInputs) {
-  a.tabs.addEventListener("change", save);
-  a.groups.addEventListener("change", save);
 }
 
 function bindShortcutEditor({ command, defaultShortcut, input, saveBtn, resetBtn, status }) {

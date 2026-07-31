@@ -23,21 +23,21 @@
         <button id="opts-btn" class="g-btn" title="Options">⚙</button>
       </div>
       <div class="row">
-        <label class="opt"><input type="checkbox" id="control-size-chk" /> Control group size</label>
+        <label class="opt"><input type="checkbox" id="control-size-chk" checked /> Control group size</label>
       </div>
       <div id="status-line" class="status-line hidden" role="status" aria-live="polite"></div>
-      <div id="size-controls" class="hidden">
+      <div id="size-controls">
         <div class="row">
-          <label class="opt" for="window-slider">Avg group size: <b id="window-val">8</b></label>
-          <input type="range" id="window-slider" min="1" max="60" step="any" value="8" />
+          <label class="opt" for="window-slider">Avg group size: <b id="window-val">3</b></label>
+          <input type="range" id="window-slider" min="1" max="60" step="any" value="3" />
         </div>
         <div class="row">
-          <label class="opt" for="penalty-slider">Big-group penalty: <b id="penalty-val">0.0</b></label>
-          <input type="range" id="penalty-slider" min="0" max="10" step="any" value="3" />
+          <label class="opt" for="penalty-slider">Big-group penalty: <b id="penalty-val">0.14</b></label>
+          <input type="range" id="penalty-slider" min="0" max="10" step="any" value="0.35" />
         </div>
         <div class="row">
-          <label class="opt" for="small-penalty-slider">Small-group penalty: <b id="small-penalty-val">0.0</b></label>
-          <input type="range" id="small-penalty-slider" min="0" max="10" step="any" value="3" />
+          <label class="opt" for="small-penalty-slider">Small-group penalty: <b id="small-penalty-val">0.05</b></label>
+          <input type="range" id="small-penalty-slider" min="0" max="10" step="any" value="0.125" />
         </div>
       </div>
     </header>

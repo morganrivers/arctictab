@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { absorbSingletons, mergeSmallGroups, findIdenticalCohorts, clusterByEmbeddingsTargeted, detectExcursionsTargeted } from "../lib/cluster.js";
+import { absorbSingletons, mergeSmallGroups, findIdenticalCohorts, findRuleCohorts, clusterByEmbeddingsTargeted, detectExcursionsTargeted } from "../lib/cluster.js";
 
 const emb = (x, y) => {
   const n = Math.hypot(x, y) || 1;
@@ -171,6 +171,108 @@ test("linear mode only binds identical tabs that are already adjacent", () => {
     const idxs = g.map((t) => t.index).sort((a, b) => a - b);
     assert.equal(idxs[idxs.length - 1] - idxs[0], idxs.length - 1, "linear clusters stay contiguous");
   }
+});
+
+test("findRuleCohorts matches domain and title patterns, first rule wins", () => {
+  const tabs = [
+    { id: 1, index: 0, url: "https://mail.example.com/inbox", title: "Inbox" },
+    { id: 2, index: 1, url: "https://webmail.other.org/", title: "Home" },
+    { id: 3, index: 2, url: "https://a.example/", title: "Read your Mail here" },
+    { id: 4, index: 3, url: "https://a.example/", title: "unrelated" },
+  ];
+  const rules = [
+    { field: "domain", pattern: "mail", name: "Mail" },
+    { field: "title", pattern: "mail", name: "Mail-by-title" },
+  ];
+  const cohorts = findRuleCohorts(tabs, rules);
+  assert.equal(cohorts.length, 2);
+  const mailByDomain = cohorts.find((c) => c.name === "Mail");
+  assert.deepEqual(mailByDomain.tabs.map((t) => t.id).sort(), [1, 2]);
+  const mailByTitle = cohorts.find((c) => c.name === "Mail-by-title");
+  assert.deepEqual(mailByTitle.tabs.map((t) => t.id), [3]);
+});
+
+test("findRuleCohorts patterns are regexes: unions, anchors, character classes", () => {
+  const tabs = [
+    { id: 1, index: 0, url: "https://mail.example.com/", title: "x" },
+    { id: 2, index: 1, url: "https://outlook.example.com/", title: "x" },
+    { id: 3, index: 2, url: "https://gmail.com/", title: "x" },
+    { id: 4, index: 3, url: "https://retailmail.example/", title: "x" },
+  ];
+  const cohorts = findRuleCohorts(tabs, [{ field: "domain", pattern: "^mail\\.|^outlook\\.|^gmail\\.", name: "Mail" }]);
+  assert.equal(cohorts.length, 1);
+  assert.deepEqual(cohorts[0].tabs.map((t) => t.id).sort(), [1, 2, 3], "anchored union matches only the intended domains");
+});
+
+test("findRuleCohorts treats an invalid regex as no match rather than throwing", () => {
+  const tabs = [{ id: 1, index: 0, url: "https://mail.example.com/", title: "x" }];
+  assert.doesNotThrow(() => {
+    const cohorts = findRuleCohorts(tabs, [{ field: "domain", pattern: "mail(", name: "Mail" }]);
+    assert.equal(cohorts.length, 0);
+  });
+});
+
+test("findRuleCohorts falls back to the pattern as the name when unnamed", () => {
+  const tabs = [{ id: 1, index: 0, url: "https://mail.example.com/", title: "x" }];
+  const cohorts = findRuleCohorts(tabs, [{ field: "domain", pattern: "mail", name: "" }]);
+  assert.equal(cohorts[0].name, "mail");
+});
+
+test("grouping rules force a named group regardless of content similarity", () => {
+  const tabs = [
+    { id: 1, index: 0, url: "https://mail.example.com/", title: "Inbox" },
+    { id: 2, index: 1, url: "https://news.example/", title: "Weather report" },
+    { id: 3, index: 2, url: "https://news.example/2", title: "Weather forecast" },
+    { id: 4, index: 3, url: "https://mail.other.org/", title: "Compose" },
+  ];
+  const embById = new Map([
+    [1, emb(1, 0)],
+    [2, emb(0, 1)], [3, emb(0, 1)],
+    [4, emb(0.9, 0.1)],
+  ]);
+  const res = clusterByEmbeddingsTargeted(tabs, tabs.map((t) => embById.get(t.id)), {
+    targetAvgSize: 2,
+    groupingRules: [{ field: "domain", pattern: "mail", name: "Mail" }],
+  });
+  const mailGroup = res.groups.find((g) => g.some((t) => t.id === 1));
+  assert.deepEqual(mailGroup.map((t) => t.id).sort(), [1, 4], "mail tabs are grouped together despite dissimilar embeddings");
+  assert.equal(res.ruleNames.get([1, 4].join(",")), "Mail");
+});
+
+test("a single tab matching a rule still gets its own locked group, not absorbed", () => {
+  const tabs = [
+    { id: 1, index: 0, url: "https://a.example/", title: "A" },
+    { id: 2, index: 1, url: "https://a.example/2", title: "A2" },
+    { id: 3, index: 2, url: "https://mail.example.com/", title: "Inbox" },
+  ];
+  const embById = new Map([
+    [1, emb(1, 0)], [2, emb(1, 0)],
+    [3, emb(1, 0.05)],
+  ]);
+  const res = clusterByEmbeddingsTargeted(tabs, tabs.map((t) => embById.get(t.id)), {
+    targetAvgSize: 2,
+    groupingRules: [{ field: "domain", pattern: "mail", name: "Mail" }],
+  });
+  const mailGroup = res.groups.find((g) => g.some((t) => t.id === 3));
+  assert.deepEqual(mailGroup.map((t) => t.id), [3], "lone rule match is not absorbed into the similar neighbour");
+});
+
+test("linear mode splits a rule cohort at real strip discontinuities", () => {
+  const tabs = [
+    { id: 1, index: 0, url: "https://mail.example.com/a", title: "Inbox" },
+    { id: 2, index: 1, url: "https://news.example/", title: "News" },
+    { id: 3, index: 2, url: "https://mail.example.com/b", title: "Sent" },
+  ];
+  const embById = new Map([[1, emb(1, 0)], [2, emb(0, 1)], [3, emb(1, 0)]]);
+  const res = detectExcursionsTargeted(tabs, tabs.map((t) => embById.get(t.id)), {
+    targetAvgSize: 2,
+    groupingRules: [{ field: "domain", pattern: "mail", name: "Mail" }],
+  });
+  for (const g of res.groups) {
+    const idxs = g.map((t) => t.index).sort((a, b) => a - b);
+    assert.equal(idxs[idxs.length - 1] - idxs[0], idxs.length - 1, "linear clusters stay contiguous");
+  }
+  assert.ok(!res.groups.some((g) => g.length === 3 && g.some((t) => t.id === 1) && g.some((t) => t.id === 3)));
 });
 
 test("a leftover lone tab is not folded into an own-group cohort", () => {

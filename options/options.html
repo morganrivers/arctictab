@@ -83,6 +83,14 @@
         <p class="hint">Tabs sharing a URL or a title are always placed in the same group, however many there are. They are also left out of the group-size math entirely, so a pile of identical tabs (a stack of new tabs, say) cannot skew "Control group size" or its penalties for everything else.</p>
       </section>
       <section>
+        <h2>Custom grouping rules</h2>
+        <p class="hint">Force tabs matching a domain or title pattern into one named group, always, regardless of content. Patterns are regular expressions (case-insensitive), so <code>mail|gmail|outlook</code> matches any of the three. The first matching rule wins for a given tab; matched tabs are held out of automatic clustering entirely.</p>
+        <div id="groupingRulesList" class="grouping-rules-list"></div>
+        <div class="row-btns">
+          <button type="button" id="addGroupingRule">Add rule</button>
+        </div>
+      </section>
+      <section>
         <label>
           <input type="checkbox" id="identicalOwnGroup" />
           Identical tabs always get their own group
@@ -166,7 +174,7 @@
           <input type="checkbox" id="hideControlGroupSize" />
           Hide "Control group size" checkbox
         </label>
-        <p class="hint">When hidden, control group size stays off and the size sliders are unavailable.</p>
+        <p class="hint">Only hides the checkbox and sliders from view; grouping keeps using their last values.</p>
       </section>
       <section>
         <label>
@@ -178,22 +186,6 @@
           </select>
         </label>
         <p class="hint">How auto-generated group names are shaped. Two-word names (e.g. <i>Sourdough Recipes</i>) are usually more descriptive; one-word names are terser.</p>
-      </section>
-      <section>
-        <h2>Auto group count</h2>
-        <p class="hint">When "Control group size" is off in the sidebar, the preferred number of groups is derived from the tab count by interpolating between these anchor points. Beyond the last anchor, the rate of the last segment is extrapolated.</p>
-        <label class="anchor-row">
-          <input type="number" id="anchorTabs1" min="1" /> tabs →
-          <input type="number" id="anchorGroups1" min="1" /> groups
-        </label>
-        <label class="anchor-row">
-          <input type="number" id="anchorTabs2" min="1" /> tabs →
-          <input type="number" id="anchorGroups2" min="1" /> groups
-        </label>
-        <label class="anchor-row">
-          <input type="number" id="anchorTabs3" min="1" /> tabs →
-          <input type="number" id="anchorGroups3" min="1" /> groups
-        </label>
       </section>
       <section>
         <h2>Naming thresholds</h2>

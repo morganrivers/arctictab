@@ -1,6 +1,6 @@
 import { buildText, embedBatch, getExtractor, onExtractorProgress } from "../lib/embed.js";
 import { getMany, put } from "../lib/cache.js";
-import { detectExcursions, detectExcursionsTargeted, clusterByEmbeddings, clusterByEmbeddingsTargeted, orderGroupsBySimilarity, absorbSingletons } from "../lib/cluster.js";
+import { detectExcursions, detectExcursionsTargeted, clusterByEmbeddings, clusterByEmbeddingsTargeted, orderGroupsBySimilarity, absorbSingletons, groupKey } from "../lib/cluster.js";
 import { nameGroups } from "../lib/names.js";
 import { initTheme } from "../lib/theme.js";
 import { orderTabIdsForStrip, planGroupSync, mirrorLayout } from "../lib/taborder.js";
@@ -8,7 +8,7 @@ import { querySearch, resolveWindowId } from "../lib/searchclient.js";
 import { TRANSPARENT_PX, faviconUrlFor } from "../lib/favicon.js";
 import { debugLog, isDebugEnabled, onDebugChange } from "../lib/log.js";
 import { createDevLogger, captureGlobalErrors } from "../lib/devlog.js";
-import { OPTIONS_KEY, DEFAULT_AUTO_ANCHORS, OPTIONS_DEFAULTS } from "../lib/options.js";
+import { OPTIONS_KEY, OPTIONS_DEFAULTS } from "../lib/options.js";
 
 initTheme();
 
@@ -76,11 +76,10 @@ function suppressMovesFor(ms) {
 const customLabels = new Map();
 // Auto-assigned names from the last naming pass, keyed by groupKey.
 const autoNames = new Map();
+// Forced names from user grouping rules (options.groupingRules), keyed by groupKey.
+// Repopulated on every recluster since group membership can change.
+let ruleNames = new Map();
 let lastLoggedFingerprint = null;
-
-function groupKey(group) {
-  return group.map((t) => t.id).sort((a, b) => a - b).join(",");
-}
 
 function labelFor(group) {
   const key = groupKey(group);
@@ -90,6 +89,7 @@ function labelFor(group) {
     if (p) return p.name;
   }
   if (customLabels.has(key)) return customLabels.get(key);
+  if (ruleNames.has(key)) return ruleNames.get(key);
   return autoNames.get(key) || "group";
 }
 
@@ -238,28 +238,6 @@ function findContainingGroup(tabId, groups) {
   return null;
 }
 
-function computeAutoGroupCount(tabCount, anchors) {
-  const list = (anchors && anchors.length ? anchors : DEFAULT_AUTO_ANCHORS)
-    .filter((a) => a && a.tabs > 0 && a.groups > 0)
-    .slice()
-    .sort((a, b) => a.tabs - b.tabs);
-  if (list.length === 0) return Math.max(1, Math.round(tabCount / 8));
-  if (tabCount <= list[0].tabs) return list[0].groups;
-  for (let i = 1; i < list.length; i++) {
-    if (tabCount <= list[i].tabs) {
-      const a = list[i - 1];
-      const b = list[i];
-      const t = (tabCount - a.tabs) / (b.tabs - a.tabs);
-      return a.groups + t * (b.groups - a.groups);
-    }
-  }
-  const n = list.length;
-  const a = list[n - 2] || list[n - 1];
-  const b = list[n - 1];
-  const span = Math.max(1, b.tabs - a.tabs);
-  const slope = (b.groups - a.groups) / span;
-  return b.groups + (tabCount - b.tabs) * slope;
-}
 let options = { ...OPTIONS_DEFAULTS };
 let appliedSnapshot = null;
 function effectiveAutoApplyNaming() {
@@ -623,23 +601,18 @@ async function recluster({ forceSimilarity = false } = {}) {
     groups = [];
     threshold = 0; avg = 0; iterations = 0;
     statusMsg = "no tabs";
-  } else if (controlChk.checked) {
+    ruleNames = new Map();
+  } else {
+    // The "Control group size" checkbox only shows or hides these sliders; it
+    // never changes how clustering runs. The sliders always hold the size
+    // target, so unchecking the box can't move tabs into different groups.
     const target = windowFromSlider();
     const sizePenalty = penaltyFromSlider();
     const smallSizePenalty = smallPenaltyFromSlider();
     log(`recluster (${mode}): ${clusterTabs.length} tabs, target=${target}, penalty=${sizePenalty.toFixed(2)}, smallPenalty=${smallSizePenalty.toFixed(2)}`);
     const targetedFn = useSimilarity ? clusterByEmbeddingsTargeted : detectExcursionsTargeted;
-    ({ groups, threshold, avg, iterations } = targetedFn(clusterTabs, clusterEmbeddings, { targetAvgSize: target, sizePenalty, smallSizePenalty, groupIdenticalTogether: options.groupIdenticalTogether, identicalOwnGroup: options.identicalOwnGroup }));
+    ({ groups, threshold, avg, iterations, ruleNames } = targetedFn(clusterTabs, clusterEmbeddings, { targetAvgSize: target, sizePenalty, smallSizePenalty, groupIdenticalTogether: options.groupIdenticalTogether, identicalOwnGroup: options.identicalOwnGroup, groupingRules: options.groupingRules }));
     statusMsg = `${groups.length} groups, avg ${avg.toFixed(1)} (${mode}, target ${target}, thr ${threshold.toFixed(2)}, ${iterations} iter)`;
-  } else {
-    const desired = Math.max(1, Math.round(computeAutoGroupCount(clusterTabs.length, options.autoGroupAnchors)));
-    const target = Math.max(1, clusterTabs.length / desired);
-    const sizePenalty = penaltyFromSlider();
-    const smallSizePenalty = smallPenaltyFromSlider();
-    log(`recluster (${mode}, auto): ${clusterTabs.length} tabs → ${desired} groups, target=${target.toFixed(2)}, penalty=${sizePenalty.toFixed(2)}, smallPenalty=${smallSizePenalty.toFixed(2)}`);
-    const targetedFn = useSimilarity ? clusterByEmbeddingsTargeted : detectExcursionsTargeted;
-    ({ groups, threshold, avg, iterations } = targetedFn(clusterTabs, clusterEmbeddings, { targetAvgSize: target, sizePenalty, smallSizePenalty, groupIdenticalTogether: options.groupIdenticalTogether, identicalOwnGroup: options.identicalOwnGroup }));
-    statusMsg = `${groups.length} groups, avg ${avg.toFixed(1)} (${mode}, auto target ${target.toFixed(1)} for ${desired})`;
   }
   if (pinningActive({ forceSimilarity })) groups = postProcessPins(groups, tabs, embeddings);
   else clusterPinId.clear();
@@ -786,7 +759,7 @@ async function logTabSnapshot({ force = false } = {}) {
     groups: state.lastGroups.map((g) => {
       const key = groupKey(g);
       return {
-        name: autoNames.get(key) || customLabels.get(key) || "group",
+        name: autoNames.get(key) || customLabels.get(key) || ruleNames.get(key) || "group",
         tabIds: g.map((t) => t.id),
         centroid: Array.from(groupCentroid(g, tabIdxById, state.embeddings)),
       };
