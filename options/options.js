@@ -21,6 +21,7 @@ const autoApplyNaming = $("#autoApplyNaming");
 const autoApplyNamingHint = $("#autoApplyNamingDisabledHint");
 const hideApplyGroupsHint = $("#hideApplyGroupsDisabledHint");
 const hideRearrangeHint = $("#hideRearrangeDisabledHint");
+const ctrlTabNotice = $("#ctrlTabNotice");
 const nameStyle = $("#nameStyle");
 const usePinning = $("#usePinning");
 const useBookmark = $("#useBookmark");
@@ -46,6 +47,9 @@ function showSlider(k) {
 
 function updateDisabledStates() {
   const namingForced = autoApplyGroups.checked;
+  console.assert(ctrlTabNotice, "the Ctrl+Tab notice must exist in the options markup");
+  ctrlTabNotice.classList.toggle("show", namingForced);
+
   autoApplyNaming.disabled = namingForced;
   autoApplyNaming.closest("label").classList.toggle("disabled", namingForced);
   autoApplyNamingHint.textContent = "(uncheck \"Auto-organize tabs\" to use this setting)";

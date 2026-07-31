@@ -40,6 +40,9 @@ section .hint:first-of-type { margin-left: 0; }
 input[type="checkbox"] { accent-color: var(--accent); }
 .inline-hint { color: var(--muted); font-size: 12px; font-style: italic; display: none; }
 .inline-hint.show { display: inline; }
+.notice { display: none; margin-left: 0; border-left: 3px solid var(--accent); padding-left: 10px; color: var(--fg); }
+.notice code { background: var(--border); border-radius: 3px; padding: 1px 4px; user-select: all; }
+.notice.show { display: block; }
 label.disabled { opacity: 0.55; cursor: not-allowed; }
 label.disabled input { cursor: not-allowed; }
 .row-btns { display: flex; gap: 8px; margin-top: 8px; }

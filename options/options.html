@@ -24,7 +24,7 @@
           <input type="checkbox" id="showSearchBar" />
           Show tab search bar in sidebar
         </label>
-        <p class="hint">A search box at the top of the sidebar for jumping to an open tab. Ranks matches with the on-device embedding model blended with keyword (BM25) matching. The keyboard shortcut below opens the same search as a toolbar panel, whether or not this box is shown.</p>
+        <p class="hint">A search box at the top of the sidebar for jumping to an open tab.</p>
         <label>
           Keyboard shortcut
           <input type="text" id="searchShortcut" placeholder="Ctrl+Shift+F" autocomplete="off" spellcheck="false" />
@@ -84,7 +84,7 @@
       </section>
       <section>
         <h2>Custom grouping rules</h2>
-        <p class="hint">Force tabs matching a domain or title pattern into one named group, always, regardless of content. Patterns are regular expressions (case-insensitive), so <code>mail|gmail|outlook</code> matches any of the three. The first matching rule wins for a given tab; matched tabs are held out of automatic clustering entirely.</p>
+        <p class="hint">Force tabs matching a domain or title pattern into one named group, always, regardless of content. Patterns are regular expressions (case-insensitive), so <code>mail|gmail|outlook</code> matches any of the three.</p>
         <div id="groupingRulesList" class="grouping-rules-list"></div>
         <div class="row-btns">
           <button type="button" id="addGroupingRule">Add rule</button>
@@ -110,7 +110,8 @@
           <input type="checkbox" id="autoApplyGroups" />
           Auto-organize tabs
         </label>
-        <p class="hint">Moves tabs. Clusters by content across the whole tab strip rather than by position, then rearranges the strip and creates Firefox tab groups automatically every time the clustering recomputes. Matching pages end up together no matter where they were opened. When off, tabs are never moved on their own and groups follow the existing strip order. While on, the sidebar's "Re-organize tabs" button is hidden, since pressing it would only repeat what already happens on every recompute.</p>
+        <p class="hint">Moves tabs. Clusters by content across the whole tab strip rather than by position, then rearranges the strip and creates Firefox tab groups automatically every time the clustering recomputes. Matching pages end up together no matter where they were opened.</p>
+        <p class="hint notice" id="ctrlTabNotice"><b>Recommended with this setting: make Ctrl+Tab cycle by recently used order.</b> Paste <code>about:config</code> into the address bar and set <code>browser.ctrlTab.sortByRecentlyUsed</code> to <b>true</b>. It takes effect immediately, with no restart.</p>
       </section>
       <section id="autoApplyNamingSection">
         <label>
@@ -212,7 +213,6 @@
           <input type="checkbox" id="debugLogging" />
           Enable debug logging
         </label>
-        <p class="hint">Off by default. When on, verbose messages are written to the browser console and the ⎘ button (copies the session log and a snapshot to the clipboard) appears in the sidebar. Leave off unless you're diagnosing an issue.</p>
       </section>
       <section>
         <h2>Support</h2>
