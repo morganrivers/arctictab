@@ -5,7 +5,26 @@ import {
   orderGroupsForRender,
   planGroupSync,
   mirrorLayout,
+  dropIndexFor,
+  planBlockMove,
+  blockLandingOrder,
+  planStripReorder,
 } from "../lib/taborder.js";
+
+// Firefox applies tabs.move as a remove followed by an insert, so replay a plan
+// the way the browser would and compare against the layout it should produce.
+function applyBlockMove(orderedIds, movingIds, startIndex) {
+  const list = [...orderedIds];
+  for (const { id, index } of planBlockMove(orderedIds, movingIds, startIndex)) {
+    list.splice(list.indexOf(id), 1);
+    list.splice(index, 0, id);
+  }
+  return list;
+}
+
+function dropBlock(strip, block, targetId, before) {
+  return applyBlockMove(strip, block, dropIndexFor(strip, block, targetId, before));
+}
 
 function tab(id, index, url = `https://site${id}.example/`) {
   return { id, index, url };
@@ -172,4 +191,128 @@ test("orderTabIdsForStrip pulls identical tabs in a group into one run", () => {
     { id: 5, index: 4, url: "about:newtab", title: "New Tab" },
   ];
   assert.deepEqual(orderTabIdsForStrip([group]), [1, 3, 5, 2, 4]);
+});
+
+test("a dropped tab lands on the requested side of its target", () => {
+  const strip = [10, 11, 12, 13];
+  assert.deepEqual(dropBlock(strip, [10], 12, true), [11, 10, 12, 13]);
+  assert.deepEqual(dropBlock(strip, [10], 12, false), [11, 12, 10, 13]);
+  assert.deepEqual(dropBlock(strip, [13], 11, true), [10, 13, 11, 12]);
+  assert.deepEqual(dropBlock(strip, [13], 11, false), [10, 11, 13, 12]);
+});
+
+test("a dragged selection lands as one run, in strip order, even when it was scattered", () => {
+  const strip = [10, 11, 12, 13, 14];
+  const block = [10, 12];
+  assert.deepEqual(dropBlock(strip, block, 14, true), [11, 13, 10, 12, 14]);
+  assert.deepEqual(dropBlock(strip, block, 14, false), [11, 13, 14, 10, 12]);
+  assert.deepEqual(dropBlock(strip, [14, 11], 13, true), [10, 12, 11, 14, 13]);
+});
+
+test("a dragged selection moves backwards past its target as one run", () => {
+  const strip = [10, 11, 12, 13, 14];
+  assert.deepEqual(dropBlock(strip, [13, 14], 11, true), [10, 13, 14, 11, 12]);
+  assert.deepEqual(dropBlock(strip, [13, 14], 10, true), [13, 14, 10, 11, 12]);
+});
+
+test("a selection straddling its drop point still lands as one run", () => {
+  const strip = [1, 2, 3, 4, 5, 6];
+  assert.deepEqual(dropBlock(strip, [1, 6], 4, true), [2, 3, 1, 6, 4, 5]);
+  assert.deepEqual(dropBlock(strip, [1, 2, 6], 4, true), [3, 1, 2, 6, 4, 5]);
+});
+
+test("a block dropped at the head of the strip leads it", () => {
+  const strip = [10, 11, 12];
+  assert.equal(dropIndexFor(strip, [12], 10, true), 0);
+  assert.deepEqual(applyBlockMove(strip, [12], 0), [12, 10, 11]);
+});
+
+// Firefox only takes one index per move, so the plan has to sequence the moves
+// so that the tabs still waiting their turn do not shift each other out of
+// place. Check every arrangement small enough to enumerate rather than trusting
+// the handful of cases above.
+test("every block move plan reproduces the layout it promises", () => {
+  for (let n = 2; n <= 7; n++) {
+    const strip = Array.from({ length: n }, (_, i) => i + 1);
+    for (let mask = 1; mask < (1 << n) - 1; mask++) {
+      const block = strip.filter((_, i) => mask & (1 << i));
+      const restLength = n - block.length;
+      for (let start = 0; start <= restLength; start++) {
+        assert.deepEqual(
+          applyBlockMove(strip, block, start),
+          blockLandingOrder(strip, block, start),
+          `strip ${strip} block ${block} start ${start}`,
+        );
+      }
+    }
+  }
+});
+
+test("a block move never touches a tab outside the selection", () => {
+  const strip = [1, 2, 3, 4, 5, 6];
+  const block = [1, 6];
+  const moved = planBlockMove(strip, block, 2).map((m) => m.id).sort();
+  assert.deepEqual(moved, [1, 6]);
+});
+
+function applyReorder(currentIds, targetIds) {
+  const list = [...currentIds];
+  for (const { id, index } of planStripReorder(currentIds, targetIds)) {
+    list.splice(list.indexOf(id), 1);
+    list.splice(index, 0, id);
+  }
+  return list;
+}
+
+test("a strip already in cluster order needs no moves at all", () => {
+  assert.deepEqual(planStripReorder([1, 2, 3], [1, 2, 3]), []);
+});
+
+// The case from the logs: closing a tab swapped two clusters, and the old code
+// moved all ten tabs to restate an order that was one swap away from correct.
+test("a two-tab swap moves one tab, not the whole strip", () => {
+  const current = [38, 43, 36, 3, 28, 11, 12, 18, 29, 13];
+  const target = [38, 36, 43, 3, 28, 11, 12, 18, 29, 13];
+  const moves = planStripReorder(current, target);
+  assert.equal(moves.length, 1);
+  assert.deepEqual(applyReorder(current, target), target);
+});
+
+test("a tab pulled to the front of the strip moves alone", () => {
+  const current = [1, 2, 3, 4, 5];
+  const target = [5, 1, 2, 3, 4];
+  assert.deepEqual(planStripReorder(current, target), [{ id: 5, index: 0 }]);
+  assert.deepEqual(applyReorder(current, target), target);
+});
+
+test("a rotation moves one tab rather than every tab after it", () => {
+  const current = [1, 2, 3, 4];
+  const target = [2, 3, 4, 1];
+  assert.equal(planStripReorder(current, target).length, 1);
+  assert.deepEqual(applyReorder(current, target), target);
+});
+
+// Exhaustive over every pair of orders small enough to enumerate: the plan has
+// to land on the target, and has to use the fewest moves possible, since each
+// move is a tab animation the user watches.
+test("every reorder plan reaches its target with the fewest possible moves", () => {
+  const permutations = (a) => (a.length <= 1 ? [a] : a.flatMap((x, i) =>
+    permutations([...a.slice(0, i), ...a.slice(i + 1)]).map((p) => [x, ...p])));
+  for (let n = 1; n <= 6; n++) {
+    const perms = permutations(Array.from({ length: n }, (_, i) => i + 1));
+    for (const current of perms) {
+      for (const target of perms) {
+        assert.deepEqual(applyReorder(current, target), target, `${current} -> ${target}`);
+        const rank = new Map(target.map((id, i) => [id, i]));
+        const tails = [];
+        for (const r of current.map((id) => rank.get(id))) {
+          let lo = 0;
+          let hi = tails.length;
+          while (lo < hi) { const m = (lo + hi) >> 1; if (tails[m] < r) lo = m + 1; else hi = m; }
+          tails[lo] = r;
+        }
+        assert.equal(planStripReorder(current, target).length, n - tails.length, `${current} -> ${target}`);
+      }
+    }
+  }
 });

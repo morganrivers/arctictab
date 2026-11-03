@@ -3,12 +3,17 @@ import { getMany, put } from "../lib/cache.js";
 import { detectExcursions, detectExcursionsTargeted, clusterByEmbeddings, clusterByEmbeddingsTargeted, orderGroupsBySimilarity, absorbSingletons, groupKey } from "../lib/cluster.js";
 import { nameGroups } from "../lib/names.js";
 import { initTheme } from "../lib/theme.js";
-import { orderTabIdsForStrip, planGroupSync, mirrorLayout } from "../lib/taborder.js";
+import { orderTabIdsForStrip, planGroupSync, mirrorLayout, dropIndexFor, planBlockMove, planStripReorder } from "../lib/taborder.js";
+import { resolveSelectionClick, pruneSelection, dragPayloadFor, orderDragged } from "../lib/selection.js";
 import { querySearch, resolveWindowId } from "../lib/searchclient.js";
 import { TRANSPARENT_PX, faviconUrlFor } from "../lib/favicon.js";
 import { debugLog, isDebugEnabled, onDebugChange } from "../lib/log.js";
 import { createDevLogger, captureGlobalErrors } from "../lib/devlog.js";
 import { OPTIONS_KEY, OPTIONS_DEFAULTS } from "../lib/options.js";
+import { collectMetas } from "../lib/meta.js";
+import { openContextMenu, closeContextMenu } from "../lib/contextmenu.js";
+import { tabMenuModel, runTabMenuAction } from "../lib/tabmenu.js";
+import { isOutsideWindow, canMoveToNewWindow, moveTabsToNewWindow } from "../lib/newwindow.js";
 
 initTheme();
 
@@ -665,7 +670,7 @@ async function recluster({ forceSimilarity = false } = {}) {
 
 async function resyncAndRender(groups) {
   if (!state?.tabs) return;
-  const live = await browser.tabs.query({ currentWindow: true });
+  const live = clusterableTabs(await browser.tabs.query({ currentWindow: true }));
   const liveById = new Map(live.map((t) => [t.id, t]));
   const survivors = state.tabs.filter((t) => liveById.has(t.id));
   if (survivors.length !== live.length || survivors.length !== state.tabs.length) {
@@ -771,17 +776,23 @@ async function logTabSnapshot({ force = false } = {}) {
   return json;
 }
 
+// The one place that decides which live tabs the panel is responsible for.
+// Anything comparing its own view of the window against `state.tabs` has to
+// narrow the live set the same way, or the two counts can never agree.
+function clusterableTabs(tabs) {
+  return options.excludePinned ? tabs.filter((t) => !t.pinned) : tabs;
+}
+
 async function queryTabs(retries = 3) {
-  const filter = (tabs) => options.excludePinned ? tabs.filter((t) => !t.pinned) : tabs;
   for (let attempt = 0; attempt < retries; attempt++) {
     const all = await browser.tabs.query({ currentWindow: true });
-    const tabs = filter(all);
+    const tabs = clusterableTabs(all);
     log(`queryTabs attempt ${attempt + 1}: got ${all.length} tabs (${tabs.length} after pinned filter)`);
     if (tabs.length > 0) return tabs;
     await new Promise((r) => setTimeout(r, 200));
   }
   const all = await browser.tabs.query({ currentWindow: true });
-  return filter(all);
+  return clusterableTabs(all);
 }
 
 let refreshId = 0;
@@ -794,8 +805,11 @@ function stableTitle(title) {
 function tabsFingerprint(tabs) {
   return tabs.map((t) => `${t.id}\x1f${t.index}\x1f${t.url || ""}\x1f${stableTitle(t.title)}\x1f${t.pinned ? 1 : 0}`).join("\x1e");
 }
+// Strip position belongs in here as well as in the tabs fingerprint: linear
+// clustering cuts on adjacency, so a tab that only moved still needs a fresh
+// pass even though every tab's text is byte-identical.
 function textsFingerprintFor(tabs, texts) {
-  return tabs.map((t, i) => `${t.id}\x1f${texts[i] || ""}`).join("\x1e");
+  return tabs.map((t, i) => `${t.id}\x1f${t.index}\x1f${texts[i] || ""}`).join("\x1e");
 }
 function resetRefreshFingerprints() {
   lastTabsFingerprint = null;
@@ -827,15 +841,14 @@ async function refresh({ silent = false, reclusterOpts = {}, force = false } = {
     log(`refresh #${id} skipped: tabs fingerprint unchanged`);
     return;
   }
-  lastTabsFingerprint = tabsFp;
 
   if (!silent) { status(`scraping metadata for ${tabs.length} tabs...`); setPhase("tabs", 1, `Reading ${tabs.length} tabs`); }
   const tMeta = performance.now();
-  let metasDone = 0;
-  const metas = await Promise.all(tabs.map((t) => getMeta(t).finally(() => {
-    metasDone++;
-    if (!silent) setPhase("meta", metasDone / tabs.length, `Reading ${metasDone}/${tabs.length} tabs`);
-  })));
+  const metas = await collectMetas(tabs, extractMeta, {
+    onSettled: (done, total) => {
+      if (!silent) setPhase("meta", done / total, `Reading ${done}/${total} tabs`);
+    },
+  });
   const texts = tabs.map((t, i) => buildText(t, metas[i]));
   log(`refresh #${id} metas done in ${(performance.now() - tMeta).toFixed(0)}ms, ${metas.filter(Boolean).length}/${tabs.length} had meta`);
 
@@ -844,7 +857,6 @@ async function refresh({ silent = false, reclusterOpts = {}, force = false } = {
     log(`refresh #${id} skipped: texts fingerprint unchanged`);
     return;
   }
-  lastTextsFingerprint = textsFp;
 
   const cached = await getMany(tabs.map((t) => t.url));
   const embeddings = new Array(tabs.length);
@@ -895,6 +907,11 @@ async function refresh({ silent = false, reclusterOpts = {}, force = false } = {
 
   if (!silent) setPhase("model", 1, "Grouping tabs");
   if (!silent) setPhase("embed", 1, "Grouping tabs");
+  // Only a pass that reaches clustering may record its fingerprints. Recording
+  // them earlier lets a pass that bailed out claim it handled this tab set, so
+  // the next identical refresh short-circuits and the panel stays stale.
+  lastTabsFingerprint = tabsFp;
+  lastTextsFingerprint = textsFp;
   state = { tabs, embeddings, texts, lastGroups: null };
   log(`refresh #${id} state set, calling recluster`);
   await recluster(reclusterOpts);
@@ -935,6 +952,16 @@ browser.tabs.onCreated.addListener((t) => {
   if (isForeignWindow(t.windowId)) { log("tabs.onCreated ignored (foreign window)", t.id, t.windowId); return; }
   log("tabs.onCreated", t.id, t.url); scheduleRefresh("onCreated");
 });
+browser.tabs.onDetached.addListener((id, { oldWindowId }) => {
+  if (isForeignWindow(oldWindowId)) return;
+  log("tabs.onDetached", id, oldWindowId);
+  scheduleRefresh("onDetached");
+});
+browser.tabs.onAttached.addListener((id, { newWindowId }) => {
+  if (isForeignWindow(newWindowId)) return;
+  log("tabs.onAttached", id, newWindowId);
+  scheduleRefresh("onAttached");
+});
 browser.tabs.onRemoved.addListener((id, removeInfo) => {
   if (isForeignWindow(removeInfo?.windowId)) { log("tabs.onRemoved ignored (foreign window)", id); return; }
   log("tabs.onRemoved", id);
@@ -945,6 +972,13 @@ browser.tabs.onRemoved.addListener((id, removeInfo) => {
     if (i !== -1) { g.tabIds.splice(i, 1); dirty = true; log(`pin cleanup: tab ${id} removed from pinned gid=${gid}`); }
   }
   if (dirty) savePinsSoon();
+  const askedAt = closeRequestedAt.get(id);
+  if (askedAt != null) {
+    closeRequestedAt.delete(id);
+    log(`tabs.onRemoved ${id}: Firefox took ${(performance.now() - askedAt).toFixed(0)}ms to close it`);
+  }
+  if (selfClosedIds.delete(id)) { log(`tabs.onRemoved ${id} was closed from the panel, no refresh needed`); return; }
+  if (selectedTabIds.has(id)) setSelection(pruneSelection(selectedTabIds, renderedTabIds().filter((x) => x !== id)), selectionAnchorId);
   scheduleRefresh("onRemoved");
 });
 browser.tabs.onMoved.addListener((id, info) => {
@@ -982,6 +1016,11 @@ browser.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
     const known = state?.tabs?.find((x) => x.id === tabId);
     if (known) { known.audible = tab.audible; known.mutedInfo = tab.mutedInfo; }
   }
+  if (changeInfo.pinned !== undefined) {
+    log("tabs.onUpdated pinned change", tabId, changeInfo.pinned);
+    scheduleRefresh("onPinned");
+    return;
+  }
   if (changeInfo.url || changeInfo.title || changeInfo.status === "complete") {
     log("tabs.onUpdated trigger", tabId, changeInfo);
     scheduleRefresh("onUpdated");
@@ -1009,7 +1048,8 @@ browser.tabs.onActivated.addListener(async ({ tabId, windowId }) => {
   if (row) row.classList.add("active");
   revealActiveTab();
   try {
-    const strip = await captureStrip();
+    const strip = await captureStripForLog();
+    if (!strip) return;
     const stripPos = strip.findIndex((t) => t.id === tabId);
     const rows = [...document.querySelectorAll("#groups .tab")].map((el) => +el.dataset.tabId);
     const panelPos = rows.indexOf(tabId);
@@ -1023,13 +1063,8 @@ browser.tabs.onActivated.addListener(async ({ tabId, windowId }) => {
 });
 log("tabs.* listeners registered");
 
-async function getMeta(tab) {
-  if (!tab.url || tab.url.startsWith("about:") || tab.url.startsWith("chrome:")) return null;
-  try {
-    return await browser.runtime.sendMessage({ type: "extractMeta", tabId: tab.id });
-  } catch {
-    return null;
-  }
+function extractMeta(tab) {
+  return browser.runtime.sendMessage({ type: "extractMeta", tabId: tab.id });
 }
 
 function ensurePinGroupForCluster(clusterTabs) {
@@ -1072,49 +1107,88 @@ function toggleGroupPin(clusterTabs, pinId) {
   scheduleRecluster();
 }
 
-async function handleTabDrop(sourceId, targetId, before, targetGroup) {
-  const sourceGroup = findContainingGroup(sourceId, state?.lastGroups);
-  const crossGroup = !sourceGroup || sourceGroup !== targetGroup;
-  if (pinningActive() && crossGroup && targetGroup) {
-    const targetKey = groupKey(targetGroup);
-    let targetGid = clusterPinId.get(targetKey);
-    if (options.autoPinGroupOnDrag && targetGid == null) {
-      targetGid = createPinnedGroup(labelFor(targetGroup), targetGroup.map((t) => t.id));
-      clusterPinId.set(targetKey, targetGid);
-      log(`drag auto-pinned group gid=${targetGid}`);
-    }
-    if (options.autoPinTabOnDrag) {
-      if (targetGid == null) {
-        targetGid = createPinnedGroup(labelFor(targetGroup), [sourceId]);
-        clusterPinId.set(targetKey, targetGid);
-        log(`drag auto-pinned solo-tab pin group gid=${targetGid}`);
-      } else {
-        pinTabIntoGroup(sourceId, targetGid);
-      }
-    }
-    savePinsSoon();
-  }
-  await reorderTabByDrop(sourceId, targetId, before);
+const TAB_DRAG_TYPE = "application/x-arctictab-tab-ids";
+
+function draggedIdsFrom(e) {
+  const raw = e.dataTransfer.getData(TAB_DRAG_TYPE) || "";
+  return raw.split(",").map((s) => +s).filter((n) => Number.isInteger(n) && n > 0);
 }
 
-async function reorderTabByDrop(sourceId, targetId, before) {
+async function handleTabDrop(sourceIds, targetId, before, targetGroup) {
+  console.assert(Array.isArray(sourceIds) && sourceIds.length > 0, "handleTabDrop needs dragged tab ids");
+  if (pinningActive() && targetGroup) {
+    const targetKey = groupKey(targetGroup);
+    const crossing = sourceIds.filter((id) => findContainingGroup(id, state?.lastGroups) !== targetGroup);
+    if (crossing.length) {
+      let targetGid = clusterPinId.get(targetKey);
+      if (options.autoPinGroupOnDrag && targetGid == null) {
+        targetGid = createPinnedGroup(labelFor(targetGroup), targetGroup.map((t) => t.id));
+        clusterPinId.set(targetKey, targetGid);
+        log(`drag auto-pinned group gid=${targetGid}`);
+      }
+      if (options.autoPinTabOnDrag) {
+        if (targetGid == null) {
+          targetGid = createPinnedGroup(labelFor(targetGroup), crossing);
+          clusterPinId.set(targetKey, targetGid);
+          log(`drag auto-pinned solo-tab pin group gid=${targetGid}`);
+        } else {
+          for (const id of crossing) pinTabIntoGroup(id, targetGid);
+        }
+      }
+      savePinsSoon();
+    }
+  }
+  await moveTabsBefore(sourceIds, targetId, before);
+}
+
+async function moveTabsToIndex(orderedIds, block, startIndex, label) {
+  suppressMoveRefresh++;
   try {
-    const [src, tgt] = await Promise.all([
-      browser.tabs.get(sourceId),
-      browser.tabs.get(targetId),
-    ]);
-    let newIndex = before ? tgt.index : tgt.index + 1;
-    if (src.index < tgt.index) newIndex--;
-    log(`drag: tab ${sourceId} (idx ${src.index}) -> ${targetId} (idx ${tgt.index}, before=${before}) => index ${newIndex}`);
-    suppressMoveRefresh++;
-    try { await browser.tabs.move(sourceId, { index: newIndex }); }
-    finally { setTimeout(() => { suppressMoveRefresh--; }, 250); }
-    status(`moved tab to index ${newIndex}`);
-    scheduleRefresh("drag-drop");
+    for (const { id, index } of planBlockMove(orderedIds, block, startIndex)) {
+      await browser.tabs.move(id, { index });
+    }
+    log(`${label}: moved [${block.join(",")}] to index ${startIndex}`);
+    status(block.length > 1 ? `moved ${block.length} tabs to index ${startIndex}` : `moved tab to index ${startIndex}`);
+    scheduleRefresh(label);
+  } finally {
+    setTimeout(() => { suppressMoveRefresh--; }, 250);
+  }
+}
+
+async function stripOrder() {
+  const strip = (await browser.tabs.query({ currentWindow: true })).sort((a, b) => a.index - b.index);
+  console.assert(strip.length > 0, "the current window must have tabs");
+  return strip;
+}
+
+async function moveTabsBefore(sourceIds, targetId, before) {
+  try {
+    const orderedIds = (await stripOrder()).map((t) => t.id);
+    const block = orderDragged(sourceIds, orderedIds);
+    const startIndex = dropIndexFor(orderedIds, block, targetId, before);
+    await moveTabsToIndex(orderedIds, block, startIndex, "drag-drop");
   } catch (e) {
-    console.error("reorderTabByDrop failed", e);
+    console.error("moveTabsBefore failed", e);
     log(`drag error: ${e?.message || e}`);
     status("drag error: " + (e?.message || e));
+  }
+}
+
+async function dragTabsToNewWindow(ids) {
+  try {
+    const strip = await stripOrder();
+    if (!canMoveToNewWindow(ids, strip)) {
+      status("not moved: these are all the tabs in this window");
+      return;
+    }
+    const block = orderDragged(ids, strip.map((t) => t.id));
+    await moveTabsToNewWindow(block, { windowsApi: browser.windows, tabsApi: browser.tabs });
+    log(`drag-out: moved [${block.join(",")}] to a new window`);
+    status(block.length > 1 ? `moved ${block.length} tabs to a new window` : "moved tab to a new window");
+  } catch (e) {
+    console.error("dragTabsToNewWindow failed", e);
+    log(`drag-out error: ${e?.message || e}`);
+    status("drag-out error: " + (e?.message || e));
   }
 }
 
@@ -1151,13 +1225,23 @@ async function captureStrip() {
   return tabs;
 }
 
+// Every strip snapshot is a round trip to the parent process, and an apply took
+// a dozen of them purely to describe itself. With diagnostics off they are skipped
+// and the log helpers below no-op on the resulting null.
+async function captureStripForLog() {
+  if (!isDebugEnabled()) return null;
+  return captureStrip();
+}
+
 function logStrip(label, tabs) {
+  if (!tabs) return;
   const active = tabs.find((t) => t.active);
   log(`strip [${label}]: ${tabs.map((t, i) => `${i}=${shortLabel(t)}`).join(" | ")}`);
   log(`strip [${label}]: active=${active ? shortLabel(active) : "none"} at index ${active ? active.index : -1}`);
 }
 
 function logStripDelta(label, before, after) {
+  if (!before || !after) return;
   const beforeIdx = new Map(before.map((t, i) => [t.id, i]));
   const moves = [];
   after.forEach((t, i) => {
@@ -1199,15 +1283,21 @@ async function rearrangeTabs(groups) {
   const ordered = orderTabIdsForStrip(groups);
   log(`rearrange: ${ordered.length} tabs target cluster order`);
 
-  const currentTabs = await browser.tabs.query({ currentWindow: true });
+  const strip = await stripOrder();
   const orderedSet = new Set(ordered);
-  const liveOrder = currentTabs
-    .filter((t) => orderedSet.has(t.id))
-    .sort((a, b) => a.index - b.index)
-    .map((t) => t.id);
-  const alreadyOrdered = liveOrder.length === ordered.length
-    && liveOrder.every((id, i) => id === ordered[i]);
-  if (alreadyOrdered) {
+  const liveOrder = strip.filter((t) => orderedSet.has(t.id)).map((t) => t.id);
+  if (liveOrder.length !== ordered.length) {
+    log(`rearrange: skipped, strip has ${liveOrder.length} of the ${ordered.length} clustered tabs`);
+    return { moved: 0, total: ordered.length };
+  }
+  // Clustering never covers pinned tabs when they are excluded, and Firefox keeps
+  // those at the head of the strip, so the clustered tabs are the run after them
+  // and one offset converts a position in that run to a strip index.
+  const offset = strip.findIndex((t) => t.id === liveOrder[0]);
+  console.assert(strip.slice(offset).every((t) => orderedSet.has(t.id)), "clustered tabs must be one run at the tail of the strip");
+
+  const moves = planStripReorder(liveOrder, ordered);
+  if (!moves.length) {
     log("rearrange: tabs already in cluster order, skipping moves");
     return { moved: 0, total: ordered.length };
   }
@@ -1215,14 +1305,17 @@ async function rearrangeTabs(groups) {
   suppressMoveRefresh++;
   let moved = 0;
   try {
-    const before = await captureStrip();
+    const before = await captureStripForLog();
     logStrip("rearrange-before", before);
     log(`rearrange: target order [${ordered.join(",")}]`);
-    await ungroupAll(ordered);
-    logStripDelta("rearrange-after-ungroup", before, await captureStrip());
-    await browser.tabs.move(ordered, { index: -1 });
-    moved = ordered.length;
-    const after = await captureStrip();
+    log(`rearrange: ${moves.length} of ${ordered.length} tabs are out of place [${moves.map((m) => m.id).join(",")}]`);
+    // Only the tabs that actually move leave their groups. Ungrouping the whole
+    // strip made Firefox tear down and rebuild every group on every pass.
+    await ungroupAll(moves.map((m) => m.id));
+    logStripDelta("rearrange-after-ungroup", before, await captureStripForLog());
+    for (const { id, index } of moves) await browser.tabs.move(id, { index: offset + index });
+    moved = moves.length;
+    const after = await captureStripForLog();
     logStrip("rearrange-after", after);
     logStripDelta("rearrange-move", before, after);
   } catch (e) { console.warn("rearrange failed", e); log(`rearrange error: ${e?.message || e}`); }
@@ -1273,13 +1366,13 @@ async function applyTabGroups(groups, { rearrange = true } = {}) {
   // mid-apply.
   suppressMoveRefresh++;
   try {
-    const stripBeforeSync = await captureStrip();
+    const stripBeforeSync = await captureStripForLog();
     log(`apply-groups: plan ungroup=[${plan.ungroup.join(",")}] group=${plan.group.map((r) => `[${r.tabIds.join(",")}]`).join(" ")}`);
     log(`apply-groups: ${groups.length} clusters, ${plan.group.length} eligible as native groups (rest stay loose)`);
     if (plan.ungroup.length) {
       log(`apply-groups: ungrouping ${plan.ungroup.length} tabs no longer in a contiguous group`);
       await ungroupAll(plan.ungroup);
-      logStripDelta("apply-groups-after-ungroup", stripBeforeSync, await captureStrip());
+      logStripDelta("apply-groups-after-ungroup", stripBeforeSync, await captureStripForLog());
     }
     for (const { tabIds: ids } of plan.group) {
       const label = labelFor(groupByTabId.get(ids[0]));
@@ -1306,20 +1399,58 @@ async function applyTabGroups(groups, { rearrange = true } = {}) {
       }
 
       try {
-        const beforeGroupCall = await captureStrip();
+        const beforeGroupCall = await captureStripForLog();
         const gid = await browser.tabs.group({ tabIds: ids });
         await browser.tabGroups.update(gid, { title: label });
-        logStripDelta(`apply-groups-group "${label}"`, beforeGroupCall, await captureStrip());
+        logStripDelta(`apply-groups-group "${label}"`, beforeGroupCall, await captureStripForLog());
         grouped++;
       } catch (e) {
         console.warn("tab grouping failed for", label, e);
       }
     }
   } finally {
-    logStrip("apply-groups-end", await captureStrip());
+    logStrip("apply-groups-end", await captureStripForLog());
     setTimeout(() => { suppressMoveRefresh--; }, 500);
   }
   return { moved, total, grouped };
+}
+
+let selectedTabIds = new Set();
+let selectionAnchorId = null;
+
+function renderedTabIds() {
+  return [...document.querySelectorAll("#groups .tab")].map((el) => +el.dataset.tabId);
+}
+
+function paintSelection() {
+  for (const el of document.querySelectorAll("#groups .tab")) {
+    el.classList.toggle("selected", selectedTabIds.has(+el.dataset.tabId));
+  }
+}
+
+function setSelection(next, anchorId) {
+  selectedTabIds = next;
+  selectionAnchorId = anchorId;
+  paintSelection();
+  log(`selection: ${selectedTabIds.size} tabs [${[...selectedTabIds].join(",")}]`);
+}
+
+function clearSelection() {
+  if (!selectedTabIds.size) return;
+  setSelection(new Set(), null);
+}
+
+function onTabRowClick(tabId, e) {
+  const { selected, anchorId, activate } = resolveSelectionClick({
+    selected: selectedTabIds,
+    anchorId: selectionAnchorId,
+    tabId,
+    orderedIds: renderedTabIds(),
+    ctrl: e.ctrlKey || e.metaKey,
+    shift: e.shiftKey,
+  });
+  setSelection(selected, anchorId);
+  if (activate) browser.tabs.update(tabId, { active: true });
 }
 
 function applyAudioState(btn, audible, muted) {
@@ -1335,24 +1466,33 @@ function createTabRow(t, containingGroup) {
   row.className = "tab";
   if (t.active) row.classList.add("active");
   if (isTabPinned(t.id)) row.classList.add("pinned");
+  if (selectedTabIds.has(t.id)) row.classList.add("selected");
   row.setAttribute("draggable", "true");
   row.draggable = true;
   row.dataset.tabId = String(t.id);
   row.title = `${t.title || ""}\n${t.url || ""}`.trim();
   row.addEventListener("mousedown", () => log(`mousedown on tab row ${t.id}`));
+  let payload = [];
   row.addEventListener("dragstart", (e) => {
-    log(`dragstart tab ${t.id}`);
-    e.dataTransfer.setData("text/plain", String(t.id));
+    payload = dragPayloadFor(selectedTabIds, t.id);
+    log(`dragstart tabs [${payload.join(",")}]`);
+    e.dataTransfer.setData(TAB_DRAG_TYPE, payload.join(","));
     e.dataTransfer.effectAllowed = "move";
-    row.classList.add("dragging");
+    for (const id of payload) {
+      document.querySelector(`#groups .tab[data-tab-id="${id}"]`)?.classList.add("dragging");
+    }
   });
-  row.addEventListener("dragend", () => {
-    row.classList.remove("dragging");
+  row.addEventListener("dragend", (e) => {
+    const point = { screenX: e.screenX, screenY: e.screenY };
+    log(`dragend tabs [${payload.join(",")}] dropEffect=${e.dataTransfer.dropEffect} at ${point.screenX},${point.screenY}, window ${window.screenX},${window.screenY} ${window.outerWidth}x${window.outerHeight}`);
+    if (e.dataTransfer.dropEffect === "none" && isOutsideWindow(point, window)) dragTabsToNewWindow(payload);
+    document.querySelectorAll(".tab.dragging").forEach((el) => el.classList.remove("dragging"));
     document.querySelectorAll(".tab.drop-before, .tab.drop-after")
       .forEach((el) => el.classList.remove("drop-before", "drop-after"));
   });
   row.addEventListener("dragover", (e) => {
     e.preventDefault();
+    if (row.classList.contains("dragging")) return;
     e.dataTransfer.dropEffect = "move";
     const r = row.getBoundingClientRect();
     const before = (e.clientY - r.top) < r.height / 2;
@@ -1367,9 +1507,9 @@ function createTabRow(t, containingGroup) {
     const r = row.getBoundingClientRect();
     const before = (e.clientY - r.top) < r.height / 2;
     row.classList.remove("drop-before", "drop-after");
-    const sourceId = +e.dataTransfer.getData("text/plain");
-    if (!sourceId || sourceId === t.id) return;
-    await handleTabDrop(sourceId, t.id, before, containingGroup);
+    const sourceIds = draggedIdsFrom(e);
+    if (!sourceIds.length || sourceIds.includes(t.id)) return;
+    await handleTabDrop(sourceIds, t.id, before, containingGroup);
   });
   const fav = document.createElement("img");
   fav.className = "favicon";
@@ -1405,9 +1545,13 @@ function createTabRow(t, containingGroup) {
   closeTabBtn.className = "t-btn";
   closeTabBtn.title = "Close tab";
   closeTabBtn.textContent = "×";
+  closeTabBtn.addEventListener("pointerdown", (e) => {
+    e.stopPropagation();
+    closePressedAt = performance.now();
+  });
   closeTabBtn.addEventListener("click", (e) => {
     e.stopPropagation();
-    closeTabs([t.id]);
+    closeTabs([t.id], { label: "close-button" });
   });
   row.appendChild(fav);
   row.appendChild(titleSpan);
@@ -1415,8 +1559,66 @@ function createTabRow(t, containingGroup) {
   row.appendChild(pinBtn);
   row.appendChild(audioBtn);
   row.appendChild(closeTabBtn);
-  row.addEventListener("click", () => browser.tabs.update(t.id, { active: true }));
+  row.addEventListener("click", (e) => onTabRowClick(t.id, e));
+  row.addEventListener("contextmenu", (e) => {
+    e.preventDefault();
+    if (!selectedTabIds.has(t.id)) clearSelection();
+    openTabContextMenu(t.id, e.clientX, e.clientY);
+  });
   return row;
+}
+
+function isBookmarkable(url) {
+  return !!url && !url.startsWith("about:") && !url.startsWith("chrome:");
+}
+
+async function bookmarkTab(tab) {
+  console.assert(tab && tab.url, "bookmarkTab needs a tab with a url");
+  try {
+    const parentId = await findBookmarksToolbarId();
+    await browser.bookmarks.create({ parentId, title: tab.title || tab.url, url: tab.url });
+    status(`bookmarked "${tab.title || tab.url}" (Bookmarks Toolbar)`);
+  } catch (e) {
+    console.error(e);
+    status("bookmark error: " + (e?.message || e));
+  }
+}
+
+async function openTabContextMenu(tabId, x, y) {
+  console.assert(Number.isInteger(tabId), "openTabContextMenu needs a tab id");
+  let tab = null;
+  let windowTabs = [];
+  try {
+    tab = await browser.tabs.get(tabId);
+    windowTabs = await browser.tabs.query({ windowId: tab.windowId });
+  } catch (e) {
+    log(`context menu skipped for tab ${tabId}: ${e?.message || e}`);
+    return;
+  }
+  console.assert(windowTabs.length > 0, "the menu's own window must have tabs");
+  const selectedIds = [...selectedTabIds];
+  const items = tabMenuModel(tab, windowTabs, { canBookmark: isBookmarkable(tab.url), selectedIds });
+  openContextMenu(items, {
+    x,
+    y,
+    onSelect: async (id) => {
+      log(`tab menu ${id} on tab ${tabId}`);
+      try {
+        await runTabMenuAction(id, {
+          tab,
+          tabs: windowTabs,
+          tabsApi: browser.tabs,
+          windowsApi: browser.windows,
+          closeTabs,
+          bookmarkTab,
+          selectedIds,
+        });
+      } catch (e) {
+        console.error(e);
+        status(`${id} failed: ${e?.message || e}`);
+      }
+    },
+  });
 }
 
 function createGroupCard(tabsInGroup, { label, getCurrentLabel, onRename, onBookmark, onClose, pinId, onTogglePin }) {
@@ -1481,6 +1683,7 @@ function createGroupCard(tabsInGroup, { label, getCurrentLabel, onRename, onBook
 
 function renderGroups(groups) {
   hideBusy();
+  closeContextMenu();
   const main = $("#groups");
   main.innerHTML = "";
   main.appendChild(createTopDropZone());
@@ -1491,13 +1694,17 @@ function renderGroups(groups) {
     renderLiveView(main, groups);
   }
   updateCountsDisplay();
+  const rendered = renderedTabIds();
+  selectedTabIds = pruneSelection(selectedTabIds, rendered);
+  if (selectionAnchorId != null && !rendered.includes(selectionAnchorId)) selectionAnchorId = null;
   revealActiveTab();
   logRenderedPanel(frozen);
 }
 
 async function logRenderedPanel(frozen) {
   try {
-    const strip = await captureStrip();
+    const strip = await captureStripForLog();
+    if (!strip) return;
     const posById = new Map(strip.map((t, i) => [t.id, i]));
     const blocks = [];
     for (const block of $("#groups").children) {
@@ -1528,28 +1735,26 @@ function createTopDropZone() {
   bar.addEventListener("drop", async (e) => {
     e.preventDefault();
     bar.classList.remove("over");
-    const sourceId = +e.dataTransfer.getData("text/plain");
-    if (!sourceId) return;
-    await moveTabToStart(sourceId);
+    const sourceIds = draggedIdsFrom(e);
+    if (!sourceIds.length) return;
+    await moveTabsToStart(sourceIds);
   });
   return bar;
 }
 
-async function moveTabToStart(sourceId) {
+async function moveTabsToStart(sourceIds) {
   try {
-    const tabs = await browser.tabs.query({ currentWindow: true });
-    const firstGroupable = tabs
-      .filter((t) => !t.pinned)
-      .sort((a, b) => a.index - b.index)[0];
-    const targetIndex = firstGroupable ? firstGroupable.index : 0;
-    log(`drop-to-start: moving tab ${sourceId} to index ${targetIndex}`);
-    suppressMoveRefresh++;
-    try { await browser.tabs.move(sourceId, { index: targetIndex }); }
-    finally { setTimeout(() => { suppressMoveRefresh--; }, 250); }
-    status(`moved tab to start (index ${targetIndex})`);
-    scheduleRefresh("drag-drop-start");
+    const strip = await stripOrder();
+    const orderedIds = strip.map((t) => t.id);
+    const block = orderDragged(sourceIds, orderedIds);
+    const moving = new Set(block);
+    const firstGroupable = strip.find((t) => !t.pinned && !moving.has(t.id));
+    const startIndex = firstGroupable
+      ? dropIndexFor(orderedIds, block, firstGroupable.id, true)
+      : strip.filter((t) => t.pinned && !moving.has(t.id)).length;
+    await moveTabsToIndex(orderedIds, block, startIndex, "drag-drop-start");
   } catch (e) {
-    console.error("moveTabToStart failed", e);
+    console.error("moveTabsToStart failed", e);
     status("drop-to-start error: " + (e?.message || e));
   }
 }
@@ -1668,10 +1873,57 @@ async function bookmarkGroup(label, groupTabs) {
   }
 }
 
+// Tabs this panel closed itself. Their onRemoved needs no full refresh: the
+// state splice below already describes the new tab set, and re-scraping and
+// re-applying every tab is what used to leave the strip busy for a second or
+// two after each close.
+const selfClosedIds = new Set();
+
+// Close-latency probes. They split the wait into the part this panel controls
+// (press to remove call) and the part Firefox controls (remove call to the tab
+// actually going away), so a slow close can be blamed on the right side.
+let closePressedAt = null;
+const closeRequestedAt = new Map();
+
+// Firefox drops a closed tab out of its native group on its own, but the group
+// boundaries the clusters imply can still shift. That resync is what made closing
+// feel slow, so it waits until the closing has stopped instead of racing the next
+// click.
+const POST_CLOSE_RESYNC_MS = 2500;
+let postCloseResyncTimer = null;
+function resyncAfterClosing() {
+  clearTimeout(postCloseResyncTimer);
+  postCloseResyncTimer = setTimeout(() => scheduleRefresh("post-close-resync"), POST_CLOSE_RESYNC_MS);
+}
+
+function dropRowsFromPanel(ids) {
+  for (const id of ids) {
+    document.querySelector(`#groups .tab[data-tab-id="${id}"]`)?.remove();
+  }
+  for (const card of document.querySelectorAll("#groups .group")) {
+    if (!card.querySelector(".tab")) card.remove();
+  }
+}
+
 async function closeTabs(ids, { label } = {}) {
+  console.assert(Array.isArray(ids), "closeTabs needs an array of tab ids");
+  if (!ids.length) return;
+  // The removal goes out before any bookkeeping. Everything after it only
+  // updates this panel, so the strip closes on the click instead of waiting for
+  // a clustering pass to finish.
+  for (const id of ids) selfClosedIds.add(id);
+  const tRemove = performance.now();
+  for (const id of ids) closeRequestedAt.set(id, tRemove);
+  const pressGap = closePressedAt == null ? null : tRemove - closePressedAt;
+  closePressedAt = null;
+  const removal = browser.tabs.remove(ids);
+  log(`closeTabs(${label || "?"}): asked to remove [${ids.join(",")}]${pressGap == null ? "" : `, ${pressGap.toFixed(0)}ms after the press`}`);
+  dropRowsFromPanel(ids);
+  if (selectedTabIds.size) setSelection(pruneSelection(selectedTabIds, renderedTabIds()), selectionAnchorId);
   try {
     status(`closing ${ids.length} tab(s)...`);
-    await browser.tabs.remove(ids);
+    await removal;
+    log(`closeTabs: ${ids.length} tabs removed in ${(performance.now() - tRemove).toFixed(0)}ms`);
     if (state) {
       const remove = new Set(ids);
       const keep = (arr) => arr.filter((_, i) => !remove.has(state.tabs[i].id));
@@ -1682,9 +1934,13 @@ async function closeTabs(ids, { label } = {}) {
       skipNextAutoApply = true;
       await recluster();
     }
+    resyncAfterClosing();
   } catch (e) {
+    for (const id of ids) { selfClosedIds.delete(id); closeRequestedAt.delete(id); }
     console.error(e);
+    log(`closeTabs failed for [${ids.join(",")}]: ${e?.message || e}, redrawing the panel`);
     status("close error: " + (e?.message || e));
+    scheduleRefresh("close-failed");
   }
 }
 
@@ -1832,6 +2088,15 @@ searchClear.addEventListener("click", () => { closeSearch(); searchInput.focus()
 document.addEventListener("mousedown", (e) => {
   if (!searchBox.contains(e.target)) hideSearchResults();
 }, true);
+
+$("#groups").addEventListener("click", (e) => {
+  if (!e.target.closest(".tab")) clearSelection();
+});
+document.addEventListener("keydown", (e) => {
+  if (e.key !== "Escape") return;
+  if (document.activeElement === searchInput) return;
+  clearSelection();
+});
 
 log("sidebar.js loaded, calling initial refresh");
 const tPreload = performance.now();
