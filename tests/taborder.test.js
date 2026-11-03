@@ -316,3 +316,14 @@ test("every reorder plan reaches its target with the fewest possible moves", () 
     }
   }
 });
+
+test("planGroupSync leaves pinned tabs out of native groups, since grouping unpins them", () => {
+  const liveTabs = [
+    { id: 1, index: 0, groupId: -1, pinned: true },
+    { id: 2, index: 1, groupId: -1 },
+    { id: 3, index: 2, groupId: -1 },
+  ];
+  const plan = planGroupSync(liveTabs, [[tab(1, 0), tab(2, 1), tab(3, 2)]]);
+  assert.deepEqual(plan.group, [{ tabIds: [2, 3] }]);
+  assert.deepEqual(plan.ungroup, []);
+});

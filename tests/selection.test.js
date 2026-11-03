@@ -62,3 +62,25 @@ test("dragging a selected tab carries the whole selection, an unselected one car
 test("orderDragged puts the dragged tabs back into strip order", () => {
   assert.deepEqual(orderDragged([4, 1, 3], ORDER), [1, 3, 4]);
 });
+
+test("the first ctrl+click keeps the active tab selected, like Firefox's tab bar", () => {
+  const r = click([], 5, 2, { ctrl: true, activeId: 5 });
+  assert.equal(r.activate, false);
+  assert.deepEqual([...r.selected].sort(), [2, 5]);
+});
+
+test("shift+click with no anchor extends from the active tab", () => {
+  const r = click([], null, 2, { shift: true, activeId: 4 });
+  assert.deepEqual([...r.selected].sort(), [2, 3, 4]);
+});
+
+test("an existing selection is extended as is, without pulling the active tab in", () => {
+  const r = click([1], 1, 3, { ctrl: true, activeId: 5 });
+  assert.deepEqual([...r.selected].sort(), [1, 3]);
+});
+
+test("with nothing selected, shift+click starts from the active tab rather than the last clicked one", () => {
+  const r = click([], 1, 5, { shift: true, activeId: 3 });
+  assert.deepEqual([...r.selected].sort(), [3, 4, 5]);
+  assert.equal(r.anchorId, 3);
+});

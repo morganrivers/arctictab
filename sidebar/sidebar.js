@@ -3,7 +3,7 @@ import { getMany, put } from "../lib/cache.js";
 import { detectExcursions, detectExcursionsTargeted, clusterByEmbeddings, clusterByEmbeddingsTargeted, orderGroupsBySimilarity, absorbSingletons, groupKey } from "../lib/cluster.js";
 import { nameGroups } from "../lib/names.js";
 import { initTheme } from "../lib/theme.js";
-import { orderTabIdsForStrip, planGroupSync, mirrorLayout, dropIndexFor, planBlockMove, planStripReorder } from "../lib/taborder.js";
+import { orderTabIdsForStrip, planGroupSync, mirrorLayout, dropIndexFor, planBlockMove, planStripReorder, isArrangeable } from "../lib/taborder.js";
 import { resolveSelectionClick, pruneSelection, dragPayloadFor, orderDragged } from "../lib/selection.js";
 import { querySearch, resolveWindowId } from "../lib/searchclient.js";
 import { TRANSPARENT_PX, faviconUrlFor } from "../lib/favicon.js";
@@ -1280,19 +1280,21 @@ function logClusterChurn(groups) {
 }
 
 async function rearrangeTabs(groups) {
-  const ordered = orderTabIdsForStrip(groups);
-  log(`rearrange: ${ordered.length} tabs target cluster order`);
-
   const strip = await stripOrder();
+  const pinnedIds = new Set(strip.filter((t) => !isArrangeable(t)).map((t) => t.id));
+  const clustered = orderTabIdsForStrip(groups);
+  const ordered = clustered.filter((id) => !pinnedIds.has(id));
+  log(`rearrange: ${ordered.length} tabs target cluster order${ordered.length < clustered.length ? `, ${clustered.length - ordered.length} pinned tabs left in place` : ""}`);
+  if (!ordered.length) return { moved: 0, total: 0 };
+
   const orderedSet = new Set(ordered);
   const liveOrder = strip.filter((t) => orderedSet.has(t.id)).map((t) => t.id);
   if (liveOrder.length !== ordered.length) {
     log(`rearrange: skipped, strip has ${liveOrder.length} of the ${ordered.length} clustered tabs`);
     return { moved: 0, total: ordered.length };
   }
-  // Clustering never covers pinned tabs when they are excluded, and Firefox keeps
-  // those at the head of the strip, so the clustered tabs are the run after them
-  // and one offset converts a position in that run to a strip index.
+  // Pinned tabs sit at the head of the strip, so the clustered tabs are the run
+  // after them and one offset converts a position in that run to a strip index.
   const offset = strip.findIndex((t) => t.id === liveOrder[0]);
   console.assert(strip.slice(offset).every((t) => orderedSet.has(t.id)), "clustered tabs must be one run at the tail of the strip");
 
@@ -1422,6 +1424,11 @@ function renderedTabIds() {
   return [...document.querySelectorAll("#groups .tab")].map((el) => +el.dataset.tabId);
 }
 
+function activeRowTabId() {
+  const row = document.querySelector("#groups .tab.active");
+  return row ? +row.dataset.tabId : null;
+}
+
 function paintSelection() {
   for (const el of document.querySelectorAll("#groups .tab")) {
     el.classList.toggle("selected", selectedTabIds.has(+el.dataset.tabId));
@@ -1446,6 +1453,7 @@ function onTabRowClick(tabId, e) {
     anchorId: selectionAnchorId,
     tabId,
     orderedIds: renderedTabIds(),
+    activeId: activeRowTabId(),
     ctrl: e.ctrlKey || e.metaKey,
     shift: e.shiftKey,
   });
