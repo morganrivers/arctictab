@@ -3,8 +3,8 @@ import { getMany, put } from "../lib/cache.js";
 import { detectExcursions, detectExcursionsTargeted, clusterByEmbeddings, clusterByEmbeddingsTargeted, orderGroupsBySimilarity, absorbSingletons, groupKey } from "../lib/cluster.js";
 import { nameGroups } from "../lib/names.js";
 import { initTheme } from "../lib/theme.js";
-import { orderTabIdsForStrip, planGroupSync, mirrorLayout, dropIndexFor, planBlockMove, planStripReorder, isArrangeable } from "../lib/taborder.js";
-import { resolveSelectionClick, pruneSelection, dragPayloadFor, orderDragged } from "../lib/selection.js";
+import { orderTabIdsForStrip, planGroupSync, mirrorLayout, planStripReorder, isArrangeable } from "../lib/taborder.js";
+import { resolveSelectionClick, pruneSelection, dragPayloadFor } from "../lib/selection.js";
 import { querySearch, resolveWindowId } from "../lib/searchclient.js";
 import { TRANSPARENT_PX, faviconUrlFor } from "../lib/favicon.js";
 import { debugLog, isDebugEnabled, onDebugChange } from "../lib/log.js";
@@ -12,8 +12,10 @@ import { createDevLogger, captureGlobalErrors } from "../lib/devlog.js";
 import { OPTIONS_KEY, OPTIONS_DEFAULTS } from "../lib/options.js";
 import { collectMetas } from "../lib/meta.js";
 import { openContextMenu, closeContextMenu } from "../lib/contextmenu.js";
-import { tabMenuModel, runTabMenuAction } from "../lib/tabmenu.js";
+import { tabMenuModel, runTabMenuAction, menuContext } from "../lib/tabmenu.js";
 import { isOutsideWindow, canMoveToNewWindow, moveTabsToNewWindow } from "../lib/newwindow.js";
+import { CoalescingRunner, QuietTimer, SerialQueue } from "../lib/timing.js";
+import { stripOrder, liveBlock, moveTabsBefore as moveStripTabsBefore, moveTabsToStart as moveStripTabsToStart } from "../lib/stripmoves.js";
 
 initTheme();
 
@@ -497,7 +499,7 @@ rearrangeBtn.addEventListener("click", async () => {
   try {
     status("recomputing best clusters...");
     skipNextAutoApply = true;
-    await refresh({ silent: true, reclusterOpts: { forceSimilarity: true }, force: true });
+    await refreshRunner.runNow(() => refresh({ silent: true, reclusterOpts: { forceSimilarity: true }, force: true }));
     if (!state?.lastGroups?.length) {
       status("no clusters available to re-organize.");
       return;
@@ -918,27 +920,14 @@ async function refresh({ silent = false, reclusterOpts = {}, force = false } = {
   log(`refresh #${id} done`);
 }
 
-let refreshTimer = null;
-let refreshing = false;
-let refreshPending = false;
+const refreshRunner = new CoalescingRunner({
+  delayMs: 600,
+  run: (source) => { log("refresh run from", source); return refresh({ silent: true }); },
+  onError: (e, source) => { console.error("[arctictab] refresh error:", e); log(`refresh from ${source} failed: ${e?.message || e}`); status("refresh error: " + (e?.message || e)); },
+  log: (msg) => log(`refreshRunner: ${msg}`),
+});
 function scheduleRefresh(source) {
-  log("scheduleRefresh from", source, "refreshing=", refreshing, "pending=", refreshPending);
-  clearTimeout(refreshTimer);
-  refreshTimer = setTimeout(async () => {
-    log("refreshTimer fired (source=", source, "refreshing=", refreshing, ")");
-    if (refreshing) { refreshPending = true; log("refresh already running, queueing"); return; }
-    refreshing = true;
-    try {
-      log("refreshTimer: calling refresh({silent:true})");
-      await refresh({ silent: true });
-      log("refreshTimer: refresh done");
-    }
-    catch (e) { console.error("[arctictab] refresh error:", e); status("refresh error: " + (e?.message || e)); }
-    finally {
-      refreshing = false;
-      if (refreshPending) { refreshPending = false; log("refreshTimer: re-scheduling pending"); scheduleRefresh("pending"); }
-    }
-  }, 600);
+  refreshRunner.schedule(source);
 }
 
 let sidebarWindowId = null;
@@ -955,6 +944,7 @@ browser.tabs.onCreated.addListener((t) => {
 browser.tabs.onDetached.addListener((id, { oldWindowId }) => {
   if (isForeignWindow(oldWindowId)) return;
   log("tabs.onDetached", id, oldWindowId);
+  forgetSelectedTab(id);
   scheduleRefresh("onDetached");
 });
 browser.tabs.onAttached.addListener((id, { newWindowId }) => {
@@ -978,7 +968,7 @@ browser.tabs.onRemoved.addListener((id, removeInfo) => {
     log(`tabs.onRemoved ${id}: Firefox took ${(performance.now() - askedAt).toFixed(0)}ms to close it`);
   }
   if (selfClosedIds.delete(id)) { log(`tabs.onRemoved ${id} was closed from the panel, no refresh needed`); return; }
-  if (selectedTabIds.has(id)) setSelection(pruneSelection(selectedTabIds, renderedTabIds().filter((x) => x !== id)), selectionAnchorId);
+  forgetSelectedTab(id);
   scheduleRefresh("onRemoved");
 });
 browser.tabs.onMoved.addListener((id, info) => {
@@ -1141,50 +1131,49 @@ async function handleTabDrop(sourceIds, targetId, before, targetGroup) {
   await moveTabsBefore(sourceIds, targetId, before);
 }
 
-async function moveTabsToIndex(orderedIds, block, startIndex, label) {
+const CURRENT_WINDOW = { currentWindow: true };
+const stripQueue = new SerialQueue();
+
+async function selfMove(label, move) {
   suppressMoveRefresh++;
   try {
-    for (const { id, index } of planBlockMove(orderedIds, block, startIndex)) {
-      await browser.tabs.move(id, { index });
-    }
+    const { block, startIndex } = await stripQueue.run(move);
     log(`${label}: moved [${block.join(",")}] to index ${startIndex}`);
     status(block.length > 1 ? `moved ${block.length} tabs to index ${startIndex}` : `moved tab to index ${startIndex}`);
     scheduleRefresh(label);
+  } catch (e) {
+    console.error(`${label} failed`, e);
+    log(`${label} error: ${e?.message || e}`);
+    status(`${label} error: ` + (e?.message || e));
   } finally {
     setTimeout(() => { suppressMoveRefresh--; }, 250);
   }
 }
 
-async function stripOrder() {
-  const strip = (await browser.tabs.query({ currentWindow: true })).sort((a, b) => a.index - b.index);
-  console.assert(strip.length > 0, "the current window must have tabs");
-  return strip;
+function moveTabsBefore(sourceIds, targetId, before) {
+  return selfMove("drag-drop", () => moveStripTabsBefore(browser.tabs, CURRENT_WINDOW, sourceIds, targetId, before));
 }
 
-async function moveTabsBefore(sourceIds, targetId, before) {
-  try {
-    const orderedIds = (await stripOrder()).map((t) => t.id);
-    const block = orderDragged(sourceIds, orderedIds);
-    const startIndex = dropIndexFor(orderedIds, block, targetId, before);
-    await moveTabsToIndex(orderedIds, block, startIndex, "drag-drop");
-  } catch (e) {
-    console.error("moveTabsBefore failed", e);
-    log(`drag error: ${e?.message || e}`);
-    status("drag error: " + (e?.message || e));
-  }
+function moveTabsToStart(sourceIds) {
+  return selfMove("drag-drop-start", () => moveStripTabsToStart(browser.tabs, CURRENT_WINDOW, sourceIds));
 }
 
 async function dragTabsToNewWindow(ids) {
   try {
-    const strip = await stripOrder();
-    if (!canMoveToNewWindow(ids, strip)) {
+    const moved = await stripQueue.run(async () => {
+      const strip = await stripOrder(browser.tabs, CURRENT_WINDOW);
+      const block = liveBlock(ids, strip.map((t) => t.id));
+      if (block.length < ids.length) log(`drag-out: ${ids.length - block.length} dragged tabs closed during the drag`);
+      if (!canMoveToNewWindow(block, strip)) return null;
+      await moveTabsToNewWindow(block, { windowsApi: browser.windows, tabsApi: browser.tabs });
+      return block;
+    });
+    if (!moved) {
       status("not moved: these are all the tabs in this window");
       return;
     }
-    const block = orderDragged(ids, strip.map((t) => t.id));
-    await moveTabsToNewWindow(block, { windowsApi: browser.windows, tabsApi: browser.tabs });
-    log(`drag-out: moved [${block.join(",")}] to a new window`);
-    status(block.length > 1 ? `moved ${block.length} tabs to a new window` : "moved tab to a new window");
+    log(`drag-out: moved [${moved.join(",")}] to a new window`);
+    status(moved.length > 1 ? `moved ${moved.length} tabs to a new window` : "moved tab to a new window");
   } catch (e) {
     console.error("dragTabsToNewWindow failed", e);
     log(`drag-out error: ${e?.message || e}`);
@@ -1279,8 +1268,12 @@ function logClusterChurn(groups) {
   lastClusterAssignment = assignment;
 }
 
-async function rearrangeTabs(groups) {
-  const strip = await stripOrder();
+function rearrangeTabs(groups) {
+  return stripQueue.run(() => rearrangeStrip(groups));
+}
+
+async function rearrangeStrip(groups) {
+  const strip = await stripOrder(browser.tabs, CURRENT_WINDOW);
   const pinnedIds = new Set(strip.filter((t) => !isArrangeable(t)).map((t) => t.id));
   const clustered = orderTabIdsForStrip(groups);
   const ordered = clustered.filter((id) => !pinnedIds.has(id));
@@ -1442,6 +1435,11 @@ function setSelection(next, anchorId) {
   log(`selection: ${selectedTabIds.size} tabs [${[...selectedTabIds].join(",")}]`);
 }
 
+function forgetSelectedTab(id) {
+  if (!selectedTabIds.has(id)) return;
+  setSelection(pruneSelection(selectedTabIds, renderedTabIds().filter((x) => x !== id)), selectionAnchorId === id ? null : selectionAnchorId);
+}
+
 function clearSelection() {
   if (!selectedTabIds.size) return;
   setSelection(new Set(), null);
@@ -1594,32 +1592,43 @@ async function bookmarkTab(tab) {
 
 async function openTabContextMenu(tabId, x, y) {
   console.assert(Number.isInteger(tabId), "openTabContextMenu needs a tab id");
-  let tab = null;
-  let windowTabs = [];
-  try {
-    tab = await browser.tabs.get(tabId);
-    windowTabs = await browser.tabs.query({ windowId: tab.windowId });
-  } catch (e) {
-    log(`context menu skipped for tab ${tabId}: ${e?.message || e}`);
+  const opened = await menuContext(tabId, [...selectedTabIds], browser.tabs);
+  if (!opened) {
+    log(`context menu skipped: tab ${tabId} closed before the menu opened`);
     return;
   }
-  console.assert(windowTabs.length > 0, "the menu's own window must have tabs");
-  const selectedIds = [...selectedTabIds];
-  const items = tabMenuModel(tab, windowTabs, { canBookmark: isBookmarkable(tab.url), selectedIds });
+  const { tab, tabs, selectedIds } = opened;
+  const items = tabMenuModel(tab, tabs, { canBookmark: isBookmarkable(tab.url), selectedIds });
+  refreshRunner.hold();
+  try {
+    showTabMenu(tabId, items, selectedIds, x, y);
+  } catch (e) {
+    refreshRunner.release();
+    throw e;
+  }
+}
+
+function showTabMenu(tabId, items, selectedIds, x, y) {
   openContextMenu(items, {
     x,
     y,
+    onClose: () => refreshRunner.release(),
     onSelect: async (id) => {
       log(`tab menu ${id} on tab ${tabId}`);
       try {
+        const now = await menuContext(tabId, selectedIds, browser.tabs);
+        if (!now) {
+          log(`tab menu ${id} skipped: tab ${tabId} closed while the menu was open`);
+          status(`${id} skipped: the tab closed while the menu was open`);
+          return;
+        }
+        if (now.selectedIds.length < selectedIds.length) log(`tab menu ${id}: ${selectedIds.length - now.selectedIds.length} selected tabs closed while the menu was open`);
         await runTabMenuAction(id, {
-          tab,
-          tabs: windowTabs,
+          ...now,
           tabsApi: browser.tabs,
           windowsApi: browser.windows,
           closeTabs,
           bookmarkTab,
-          selectedIds,
         });
       } catch (e) {
         console.error(e);
@@ -1750,23 +1759,6 @@ function createTopDropZone() {
   return bar;
 }
 
-async function moveTabsToStart(sourceIds) {
-  try {
-    const strip = await stripOrder();
-    const orderedIds = strip.map((t) => t.id);
-    const block = orderDragged(sourceIds, orderedIds);
-    const moving = new Set(block);
-    const firstGroupable = strip.find((t) => !t.pinned && !moving.has(t.id));
-    const startIndex = firstGroupable
-      ? dropIndexFor(orderedIds, block, firstGroupable.id, true)
-      : strip.filter((t) => t.pinned && !moving.has(t.id)).length;
-    await moveTabsToIndex(orderedIds, block, startIndex, "drag-drop-start");
-  } catch (e) {
-    console.error("moveTabsToStart failed", e);
-    status("drop-to-start error: " + (e?.message || e));
-  }
-}
-
 function renderUngroupedTabs(main, usedIds) {
   const leftover = state.tabs.filter((t) => !usedIds.has(t.id)).sort((a, b) => a.index - b.index);
   if (!leftover.length) return;
@@ -1894,14 +1886,16 @@ let closePressedAt = null;
 const closeRequestedAt = new Map();
 
 // Firefox drops a closed tab out of its native group on its own, but the group
-// boundaries the clusters imply can still shift. That resync is what made closing
-// feel slow, so it waits until the closing has stopped instead of racing the next
-// click.
+// boundaries the clusters imply can still shift. That resync moves rows, so it
+// waits until both the closing and the pointer in this panel have stopped,
+// instead of moving a row out from under the next click.
 const POST_CLOSE_RESYNC_MS = 2500;
-let postCloseResyncTimer = null;
+const postCloseResync = new QuietTimer({ quietMs: POST_CLOSE_RESYNC_MS, fire: () => scheduleRefresh("post-close-resync") });
 function resyncAfterClosing() {
-  clearTimeout(postCloseResyncTimer);
-  postCloseResyncTimer = setTimeout(() => scheduleRefresh("post-close-resync"), POST_CLOSE_RESYNC_MS);
+  postCloseResync.arm();
+}
+for (const type of ["pointermove", "pointerdown", "wheel", "keydown"]) {
+  document.addEventListener(type, () => postCloseResync.bump(), { capture: true, passive: true });
 }
 
 function dropRowsFromPanel(ids) {
@@ -2111,16 +2105,11 @@ const tPreload = performance.now();
 getExtractor()
   .then(() => log(`model preload ready in ${(performance.now() - tPreload).toFixed(0)}ms`))
   .catch((e) => log(`model preload failed: ${e?.message || e}`));
-refreshing = true;
-Promise.all([loadOptions(), loadPins()])
+refreshRunner.runNow(() => Promise.all([loadOptions(), loadPins()])
   .catch((e) => console.warn("[arctictab] init load failed", e))
-  .then(() => refresh())
+  .then(() => refresh()))
   .catch((e) => {
     console.error("[arctictab] init error:", e);
     status("init error: " + (e?.message || e));
   })
-  .finally(() => {
-    refreshing = false;
-    if (refreshPending) { refreshPending = false; log("init refresh: re-scheduling pending"); scheduleRefresh("init-pending"); }
-    log("init refresh complete");
-  });
+  .finally(() => log("init refresh complete"));
