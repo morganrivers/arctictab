@@ -14,7 +14,7 @@ import { collectMetas } from "../lib/meta.js";
 import { openContextMenu, closeContextMenu } from "../lib/contextmenu.js";
 import { tabMenuModel, runTabMenuAction, menuContext } from "../lib/tabmenu.js";
 import { isOutsideWindow, canMoveToNewWindow, moveTabsToNewWindow } from "../lib/newwindow.js";
-import { CoalescingRunner, QuietTimer, SerialQueue } from "../lib/timing.js";
+import { CoalescingRunner, SerialQueue } from "../lib/timing.js";
 import { stripOrder, liveBlock, moveTabsBefore as moveStripTabsBefore, moveTabsToStart as moveStripTabsToStart } from "../lib/stripmoves.js";
 
 initTheme();
@@ -76,9 +76,13 @@ let state = null;
 let rerunTimer = null;
 let autoApplying = false;
 let suppressMoveRefresh = 0;
-function suppressMovesFor(ms) {
+async function withOwnMoves(fn) {
   suppressMoveRefresh++;
-  setTimeout(() => { suppressMoveRefresh--; }, ms);
+  try {
+    return await fn();
+  } finally {
+    suppressMoveRefresh--;
+  }
 }
 const customLabels = new Map();
 // Auto-assigned names from the last naming pass, keyed by groupKey.
@@ -785,16 +789,11 @@ function clusterableTabs(tabs) {
   return options.excludePinned ? tabs.filter((t) => !t.pinned) : tabs;
 }
 
-async function queryTabs(retries = 3) {
-  for (let attempt = 0; attempt < retries; attempt++) {
-    const all = await browser.tabs.query({ currentWindow: true });
-    const tabs = clusterableTabs(all);
-    log(`queryTabs attempt ${attempt + 1}: got ${all.length} tabs (${tabs.length} after pinned filter)`);
-    if (tabs.length > 0) return tabs;
-    await new Promise((r) => setTimeout(r, 200));
-  }
+async function queryTabs() {
   const all = await browser.tabs.query({ currentWindow: true });
-  return clusterableTabs(all);
+  const tabs = clusterableTabs(all);
+  log(`queryTabs: got ${all.length} tabs (${tabs.length} after pinned filter)`);
+  return tabs;
 }
 
 let refreshId = 0;
@@ -1135,9 +1134,8 @@ const CURRENT_WINDOW = { currentWindow: true };
 const stripQueue = new SerialQueue();
 
 async function selfMove(label, move) {
-  suppressMoveRefresh++;
   try {
-    const { block, startIndex } = await stripQueue.run(move);
+    const { block, startIndex } = await stripQueue.run(() => withOwnMoves(move));
     log(`${label}: moved [${block.join(",")}] to index ${startIndex}`);
     status(block.length > 1 ? `moved ${block.length} tabs to index ${startIndex}` : `moved tab to index ${startIndex}`);
     scheduleRefresh(label);
@@ -1145,8 +1143,6 @@ async function selfMove(label, move) {
     console.error(`${label} failed`, e);
     log(`${label} error: ${e?.message || e}`);
     status(`${label} error: ` + (e?.message || e));
-  } finally {
-    setTimeout(() => { suppressMoveRefresh--; }, 250);
   }
 }
 
@@ -1158,6 +1154,12 @@ function moveTabsToStart(sourceIds) {
   return selfMove("drag-drop-start", () => moveStripTabsToStart(browser.tabs, CURRENT_WINDOW, sourceIds));
 }
 
+function reportSkippedMove(label, skipped) {
+  if (!skipped?.length) return;
+  log(`${label}: tabs [${skipped.join(",")}] closed during the move to a new window and were left out`);
+  status(`${skipped.length} tab(s) closed during the move and were left out`);
+}
+
 async function dragTabsToNewWindow(ids) {
   try {
     const moved = await stripQueue.run(async () => {
@@ -1165,11 +1167,16 @@ async function dragTabsToNewWindow(ids) {
       const block = liveBlock(ids, strip.map((t) => t.id));
       if (block.length < ids.length) log(`drag-out: ${ids.length - block.length} dragged tabs closed during the drag`);
       if (!canMoveToNewWindow(block, strip)) return null;
-      await moveTabsToNewWindow(block, { windowsApi: browser.windows, tabsApi: browser.tabs });
-      return block;
+      const { window: win, skipped } = await moveTabsToNewWindow(block, { windowsApi: browser.windows, tabsApi: browser.tabs });
+      reportSkippedMove("drag-out", skipped);
+      return win ? block.filter((id) => !skipped.includes(id)) : [];
     });
     if (!moved) {
       status("not moved: these are all the tabs in this window");
+      return;
+    }
+    if (!moved.length) {
+      status("not moved: the dragged tabs closed first");
       return;
     }
     log(`drag-out: moved [${moved.join(",")}] to a new window`);
@@ -1297,7 +1304,6 @@ async function rearrangeStrip(groups) {
     return { moved: 0, total: ordered.length };
   }
 
-  suppressMoveRefresh++;
   let moved = 0;
   try {
     const before = await captureStripForLog();
@@ -1306,15 +1312,16 @@ async function rearrangeStrip(groups) {
     log(`rearrange: ${moves.length} of ${ordered.length} tabs are out of place [${moves.map((m) => m.id).join(",")}]`);
     // Only the tabs that actually move leave their groups. Ungrouping the whole
     // strip made Firefox tear down and rebuild every group on every pass.
-    await ungroupAll(moves.map((m) => m.id));
+    await withOwnMoves(() => ungroupAll(moves.map((m) => m.id)));
     logStripDelta("rearrange-after-ungroup", before, await captureStripForLog());
-    for (const { id, index } of moves) await browser.tabs.move(id, { index: offset + index });
+    await withOwnMoves(async () => {
+      for (const { id, index } of moves) await browser.tabs.move(id, { index: offset + index });
+    });
     moved = moves.length;
     const after = await captureStripForLog();
     logStrip("rearrange-after", after);
     logStripDelta("rearrange-move", before, after);
   } catch (e) { console.warn("rearrange failed", e); log(`rearrange error: ${e?.message || e}`); }
-  finally { setTimeout(() => { suppressMoveRefresh--; }, 250); }
   return { moved, total: ordered.length };
 }
 
@@ -1329,7 +1336,6 @@ async function applyTabGroups(groups, { rearrange = true } = {}) {
       const changed = before.length !== after.length || before.some((id, i) => id !== after[i]);
       if (changed) log(`reorganize-groups: reordered ${groups.length} groups by similarity`);
     }
-    suppressMovesFor(500);
     const r = await rearrangeTabs(groups);
     moved = r?.moved ?? 0;
     total = r?.total ?? 0;
@@ -1357,56 +1363,56 @@ async function applyTabGroups(groups, { rearrange = true } = {}) {
 
   let grouped = 0;
   // ungroup/group relocate tabs to make each cluster a contiguous native group.
-  // Suppress the resulting move events so they don't trigger a redundant refresh
-  // mid-apply.
-  suppressMoveRefresh++;
-  try {
-    const stripBeforeSync = await captureStripForLog();
-    log(`apply-groups: plan ungroup=[${plan.ungroup.join(",")}] group=${plan.group.map((r) => `[${r.tabIds.join(",")}]`).join(" ")}`);
-    log(`apply-groups: ${groups.length} clusters, ${plan.group.length} eligible as native groups (rest stay loose)`);
-    if (plan.ungroup.length) {
-      log(`apply-groups: ungrouping ${plan.ungroup.length} tabs no longer in a contiguous group`);
-      await ungroupAll(plan.ungroup);
-      logStripDelta("apply-groups-after-ungroup", stripBeforeSync, await captureStripForLog());
-    }
-    for (const { tabIds: ids } of plan.group) {
-      const label = labelFor(groupByTabId.get(ids[0]));
-
-      const currentGids = ids.map((id) => tabById.get(id)?.groupId ?? -1);
-      const uniqueGids = [...new Set(currentGids)];
-      const sharedGid = (uniqueGids.length === 1 && uniqueGids[0] !== -1) ? uniqueGids[0] : null;
-      const existingMembers = sharedGid != null ? membersByGid.get(sharedGid) : null;
-      const noExtras = !!existingMembers && existingMembers.size === ids.length;
-      const titleMatches = sharedGid != null && titleByGid.get(sharedGid) === label;
-
-      if (sharedGid != null && noExtras && titleMatches) {
-        log(`apply-groups: "${label}" already correct, skipping`);
-        grouped++;
-        continue;
+  // Firefox reports those moves before each call returns, so ignoring moves
+  // while the calls run keeps them from triggering a redundant refresh.
+  await withOwnMoves(async () => {
+    try {
+      const stripBeforeSync = await captureStripForLog();
+      log(`apply-groups: plan ungroup=[${plan.ungroup.join(",")}] group=${plan.group.map((r) => `[${r.tabIds.join(",")}]`).join(" ")}`);
+      log(`apply-groups: ${groups.length} clusters, ${plan.group.length} eligible as native groups (rest stay loose)`);
+      if (plan.ungroup.length) {
+        log(`apply-groups: ungrouping ${plan.ungroup.length} tabs no longer in a contiguous group`);
+        await ungroupAll(plan.ungroup);
+        logStripDelta("apply-groups-after-ungroup", stripBeforeSync, await captureStripForLog());
       }
-      if (sharedGid != null && noExtras && !titleMatches) {
-        try {
-          await browser.tabGroups.update(sharedGid, { title: label });
-          log(`apply-groups: "${label}" title-only update`);
+      for (const { tabIds: ids } of plan.group) {
+        const label = labelFor(groupByTabId.get(ids[0]));
+
+        const currentGids = ids.map((id) => tabById.get(id)?.groupId ?? -1);
+        const uniqueGids = [...new Set(currentGids)];
+        const sharedGid = (uniqueGids.length === 1 && uniqueGids[0] !== -1) ? uniqueGids[0] : null;
+        const existingMembers = sharedGid != null ? membersByGid.get(sharedGid) : null;
+        const noExtras = !!existingMembers && existingMembers.size === ids.length;
+        const titleMatches = sharedGid != null && titleByGid.get(sharedGid) === label;
+
+        if (sharedGid != null && noExtras && titleMatches) {
+          log(`apply-groups: "${label}" already correct, skipping`);
           grouped++;
-        } catch (e) { console.warn("tab group title update failed for", label, e); }
-        continue;
-      }
+          continue;
+        }
+        if (sharedGid != null && noExtras && !titleMatches) {
+          try {
+            await browser.tabGroups.update(sharedGid, { title: label });
+            log(`apply-groups: "${label}" title-only update`);
+            grouped++;
+          } catch (e) { console.warn("tab group title update failed for", label, e); }
+          continue;
+        }
 
-      try {
-        const beforeGroupCall = await captureStripForLog();
-        const gid = await browser.tabs.group({ tabIds: ids });
-        await browser.tabGroups.update(gid, { title: label });
-        logStripDelta(`apply-groups-group "${label}"`, beforeGroupCall, await captureStripForLog());
-        grouped++;
-      } catch (e) {
-        console.warn("tab grouping failed for", label, e);
+        try {
+          const beforeGroupCall = await captureStripForLog();
+          const gid = await browser.tabs.group({ tabIds: ids });
+          await browser.tabGroups.update(gid, { title: label });
+          logStripDelta(`apply-groups-group "${label}"`, beforeGroupCall, await captureStripForLog());
+          grouped++;
+        } catch (e) {
+          console.warn("tab grouping failed for", label, e);
+        }
       }
+    } finally {
+      logStrip("apply-groups-end", await captureStripForLog());
     }
-  } finally {
-    logStrip("apply-groups-end", await captureStripForLog());
-    setTimeout(() => { suppressMoveRefresh--; }, 500);
-  }
+  });
   return { moved, total, grouped };
 }
 
@@ -1623,13 +1629,14 @@ function showTabMenu(tabId, items, selectedIds, x, y) {
           return;
         }
         if (now.selectedIds.length < selectedIds.length) log(`tab menu ${id}: ${selectedIds.length - now.selectedIds.length} selected tabs closed while the menu was open`);
-        await runTabMenuAction(id, {
+        const result = await runTabMenuAction(id, {
           ...now,
           tabsApi: browser.tabs,
           windowsApi: browser.windows,
           closeTabs,
           bookmarkTab,
         });
+        if (id === "move-window") reportSkippedMove("tab menu move-window", result.skipped);
       } catch (e) {
         console.error(e);
         status(`${id} failed: ${e?.message || e}`);
@@ -1874,9 +1881,7 @@ async function bookmarkGroup(label, groupTabs) {
 }
 
 // Tabs this panel closed itself. Their onRemoved needs no full refresh: the
-// state splice below already describes the new tab set, and re-scraping and
-// re-applying every tab is what used to leave the strip busy for a second or
-// two after each close.
+// state splice below already describes the new tab set, so only a regroup runs.
 const selfClosedIds = new Set();
 
 // Close-latency probes. They split the wait into the part this panel controls
@@ -1886,17 +1891,15 @@ let closePressedAt = null;
 const closeRequestedAt = new Map();
 
 // Firefox drops a closed tab out of its native group on its own, but the group
-// boundaries the clusters imply can still shift. That resync moves rows, so it
-// waits until both the closing and the pointer in this panel have stopped,
-// instead of moving a row out from under the next click.
-const POST_CLOSE_RESYNC_MS = 2500;
-const postCloseResync = new QuietTimer({ quietMs: POST_CLOSE_RESYNC_MS, fire: () => scheduleRefresh("post-close-resync") });
-function resyncAfterClosing() {
-  postCloseResync.arm();
-}
-for (const type of ["pointermove", "pointerdown", "wheel", "keydown"]) {
-  document.addEventListener(type, () => postCloseResync.bump(), { capture: true, passive: true });
-}
+// boundaries the clusters imply can still shift. Each finished close regroups
+// from the spliced state; closes that finish while one regroup runs share the
+// next one, so a quick run of closes costs two passes instead of one each.
+const closeRegroup = new CoalescingRunner({
+  delayMs: 0,
+  run: (source) => refreshRunner.runNow(() => { log(`close regroup after ${source}`); return recluster(); }),
+  onError: (e, source) => { console.error(e); log(`close regroup after ${source} failed: ${e?.message || e}`); status("regroup error: " + (e?.message || e)); },
+  log: (msg) => log(`closeRegroup: ${msg}`),
+});
 
 function dropRowsFromPanel(ids) {
   for (const id of ids) {
@@ -1933,10 +1936,8 @@ async function closeTabs(ids, { label } = {}) {
       const newEmbeddings = keep(state.embeddings);
       const newTexts = keep(state.texts);
       state = { tabs: newTabs, embeddings: newEmbeddings, texts: newTexts, lastGroups: null };
-      skipNextAutoApply = true;
-      await recluster();
+      closeRegroup.schedule(label || "close");
     }
-    resyncAfterClosing();
   } catch (e) {
     for (const id of ids) { selfClosedIds.delete(id); closeRequestedAt.delete(id); }
     console.error(e);

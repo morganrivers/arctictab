@@ -126,16 +126,61 @@ test("move selection to a new window skips a selected tab that closed while the 
   assert.deepEqual(b.strip(2), [2, 4]);
 });
 
-test("a tab that closes after the new window opens makes the move fail loudly", async () => {
-  const b = fakeWindow([1, 2, 3]);
+function closeOnCreate(b, closeId) {
   const realCreate = b.windows.create;
   b.windows.create = async (opts) => {
     const win = await realCreate(opts);
-    await b.tabs.remove(3);
+    await b.tabs.remove(closeId);
     return win;
   };
-  await assert.rejects(moveTabsToNewWindow([2, 3], { windowsApi: b.windows, tabsApi: b.tabs }), /Invalid tab ID: 3/);
-  assert.deepEqual(b.strip(2), [2]);
+}
+
+test("a tab that closes right after the new window opens is left out and the rest still move", async () => {
+  const b = fakeWindow([1, 2, 3, 4]);
+  closeOnCreate(b, 3);
+  const { window: win, skipped } = await moveTabsToNewWindow([2, 3, 4], { windowsApi: b.windows, tabsApi: b.tabs });
+  assert.equal(win.id, 2);
+  assert.deepEqual(skipped, [3]);
+  assert.deepEqual(b.strip(1), [1]);
+  assert.deepEqual(b.strip(2), [2, 4]);
+});
+
+test("when the first tab closes before its window opens, the next tab opens the window", async () => {
+  const b = fakeWindow([1, 2, 3, 4]);
+  const realCreate = b.windows.create;
+  let first = true;
+  b.windows.create = async (opts) => {
+    if (first) { first = false; await b.tabs.remove(2); }
+    return realCreate(opts);
+  };
+  const { skipped } = await moveTabsToNewWindow([2, 3, 4], { windowsApi: b.windows, tabsApi: b.tabs });
+  assert.deepEqual(skipped, [2]);
+  assert.deepEqual(b.strip(1), [1]);
+  assert.deepEqual(b.strip(2), [3, 4]);
+});
+
+test("when every tab closes before the move, no window opens", async () => {
+  const b = fakeWindow([1, 2, 3]);
+  await b.tabs.remove([2, 3]);
+  const result = await moveTabsToNewWindow([2, 3], { windowsApi: b.windows, tabsApi: b.tabs });
+  assert.deepEqual(result, { window: null, skipped: [2, 3] });
+  assert.equal(b.windowsById.size, 1);
+});
+
+test("a move to a new window that fails for another reason than a closed tab is not hidden", async () => {
+  const b = fakeWindow([1, 2, 3]);
+  b.tabs.move = async () => { throw new Error("Cannot move a tab into a private window"); };
+  await assert.rejects(moveTabsToNewWindow([2, 3], { windowsApi: b.windows, tabsApi: b.tabs }), /private window/);
+});
+
+test("the menu's move to a new window reports the tab that closed during the move", async () => {
+  const b = fakeWindow([1, 2, 3, 4]);
+  await openMenu(b, 2, [2, 3, 4]);
+  closeOnCreate(b, 4);
+  const now = await menuContext(2, [2, 3, 4], b.tabs);
+  const result = await runTabMenuAction("move-window", { ...now, tabsApi: b.tabs, windowsApi: b.windows, closeTabs: () => {}, bookmarkTab: () => {} });
+  assert.deepEqual(result.skipped, [4]);
+  assert.deepEqual(b.strip(2), [2, 3]);
 });
 
 test("a dragged tab that closed mid-drag is left out of the drop", async () => {

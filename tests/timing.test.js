@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { CoalescingRunner, QuietTimer, SerialQueue } from "../lib/timing.js";
+import { CoalescingRunner, SerialQueue } from "../lib/timing.js";
 import { settle } from "./fakebrowser.js";
 
 async function tick(t, ms) {
@@ -151,66 +151,68 @@ test("an event during a user refresh is refreshed after it", async (t) => {
   assert.equal(runs.length, 1);
 });
 
-function quiet(t) {
-  t.mock.timers.enable({ apis: ["setTimeout"] });
-  const fired = [];
-  const timer = new QuietTimer({ quietMs: 2500, fire: () => fired.push(Date.now()) });
-  return { timer, fired };
-}
-
-test("the regroup after closing runs once, 2.5 s after the last close", async (t) => {
-  const { timer, fired } = quiet(t);
-  timer.arm();
-  await tick(t, 1000);
-  timer.arm();
-  await tick(t, 2499);
-  assert.equal(fired.length, 0);
-  await tick(t, 1);
-  assert.equal(fired.length, 1);
-  await tick(t, 10000);
-  assert.equal(fired.length, 1);
-});
-
-test("rows do not regroup while the pointer is still moving in the panel after a close", async (t) => {
-  const { timer, fired } = quiet(t);
-  timer.arm();
-  for (let ms = 0; ms < 4000; ms += 100) {
-    await tick(t, 100);
-    timer.bump();
-  }
-  assert.equal(fired.length, 0, "the right-click at 4 s still lands on the row the pointer reached");
-  await tick(t, 2500);
-  assert.equal(fired.length, 1);
-});
-
-test("pointer movement with no close pending never starts a regroup", async (t) => {
-  const { timer, fired } = quiet(t);
-  for (let i = 0; i < 10; i++) timer.bump();
-  await tick(t, 10000);
-  assert.equal(fired.length, 0);
-  assert.equal(timer.armed, false);
-});
-
-test("the right-click race: close, move to a row, right-click, menu open, then the regroup", async (t) => {
+function closeRegroupPair(t) {
   t.mock.timers.enable({ apis: ["setTimeout"] });
   const timeline = [];
-  const runner = new CoalescingRunner({
+  const passes = [];
+  const refresh = new CoalescingRunner({
     delayMs: 600,
-    run: async (source) => { timeline.push(`refresh ${source}`); },
+    run: (source) => { const d = deferred(); timeline.push(`refresh ${source}`); passes.push(d); return d.promise.then(() => timeline.push("refresh done")); },
     onError: (e) => { throw e; },
   });
-  const resync = new QuietTimer({ quietMs: 2500, fire: () => runner.schedule("post-close-resync") });
-  resync.arm();
-  for (let ms = 0; ms < 2400; ms += 200) { await tick(t, 200); resync.bump(); }
-  timeline.push("right-click");
-  resync.bump();
-  runner.hold();
-  for (let ms = 0; ms < 5000; ms += 100) await tick(t, 100);
-  timeline.push("menu closed");
-  runner.release();
-  await tick(t, 600);
+  const regroup = new CoalescingRunner({
+    delayMs: 0,
+    run: (source) => refresh.runNow(() => { const d = deferred(); timeline.push(`regroup ${source}`); passes.push(d); return d.promise.then(() => timeline.push("regroup done")); }),
+    onError: (e) => { throw e; },
+  });
+  return { refresh, regroup, timeline, passes };
+}
+
+test("a finished close regroups at once, with no wait", async (t) => {
+  const { regroup, timeline } = closeRegroupPair(t);
+  regroup.schedule("close-button");
+  await tick(t, 0);
+  assert.deepEqual(timeline, ["regroup close-button"]);
+});
+
+test("closes that finish during a regroup share one more regroup", async (t) => {
+  const { regroup, timeline, passes } = closeRegroupPair(t);
+  regroup.schedule("close 1");
+  await tick(t, 0);
+  for (const n of [2, 3, 4]) { regroup.schedule(`close ${n}`); await tick(t, 0); }
+  passes[0].resolve();
   await settle();
-  assert.deepEqual(timeline, ["right-click", "menu closed", "refresh pending post-close-resync"]);
+  await tick(t, 0);
+  assert.deepEqual(timeline, ["regroup close 1", "regroup done", "regroup pending close 4"]);
+  passes[1].resolve();
+  await settle();
+  await tick(t, 1000);
+  assert.equal(passes.length, 2);
+});
+
+test("a close regroup waits for a running refresh instead of drawing over it", async (t) => {
+  const { refresh, regroup, timeline, passes } = closeRegroupPair(t);
+  refresh.schedule("onUpdated");
+  await tick(t, 600);
+  regroup.schedule("close-button");
+  await tick(t, 0);
+  assert.deepEqual(timeline, ["refresh onUpdated"]);
+  passes[0].resolve();
+  await settle();
+  assert.deepEqual(timeline, ["refresh onUpdated", "refresh done", "regroup close-button"]);
+});
+
+test("a tab event during a close regroup refreshes after it, not alongside", async (t) => {
+  const { refresh, regroup, timeline, passes } = closeRegroupPair(t);
+  regroup.schedule("close-button");
+  await tick(t, 0);
+  refresh.schedule("onCreated");
+  await tick(t, 600);
+  assert.deepEqual(timeline, ["regroup close-button"]);
+  passes[0].resolve();
+  await settle();
+  await tick(t, 600);
+  assert.deepEqual(timeline, ["regroup close-button", "regroup done", "refresh pending onCreated"]);
 });
 
 test("strip jobs run one after another in the order they were queued", async () => {
