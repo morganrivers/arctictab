@@ -104,7 +104,7 @@ test("each action reaches the API call the native menu would make", async () => 
   assert.deepEqual(deps.calls, [
     ["create", { windowId: WINDOW_ID, index: 3, active: true }],
     ["reload", 3],
-    ["duplicate", 3],
+    ["duplicate", 3, { index: 3, active: true }],
     ["update", 3, { muted: false }],
     ["update", 3, { pinned: true }],
     ["move", 3, { index: 1 }],
@@ -173,4 +173,19 @@ test("a selection covering the whole window cannot move to a new window", () => 
   const tabs = plain(2);
   const items = tabMenuModel(byId(tabs, 1), tabs, { selectedIds: [1, 2] });
   assert.equal(item(items, "move-window").disabled, true);
+});
+
+test("a pinned tab moves to the end of the pinned run, which Firefox would otherwise refuse", () => {
+  const tabs = strip([{ pinned: true }, { pinned: true }, {}, {}]);
+  assert.equal(moveTargetIndex("end", byId(tabs, 1), tabs), 1);
+  assert.equal(moveTargetIndex("end", byId(tabs, 3), tabs), -1);
+  assert.equal(moveTargetIndex("start", byId(tabs, 2), tabs), 0);
+  assert.equal(moveTargetIndex("start", byId(tabs, 4), tabs), 2);
+});
+
+test("closing to the left or right never closes pinned tabs, even from a pinned tab", () => {
+  const tabs = strip([{ pinned: true }, { pinned: true }, {}, {}]);
+  assert.deepEqual(tabsToward("right", byId(tabs, 1), tabs).map((t) => t.id), [3, 4]);
+  assert.deepEqual(tabsToward("left", byId(tabs, 2), tabs).map((t) => t.id), []);
+  assert.deepEqual(tabsToward("left", byId(tabs, 4), tabs).map((t) => t.id), [3]);
 });

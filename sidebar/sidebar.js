@@ -1982,6 +1982,7 @@ document.addEventListener("visibilitychange", () => {
 
 
 function hideSearchResults() {
+  searchSeq++;
   searchResults.classList.add("hidden");
   searchResults.innerHTML = "";
   searchCurrent = [];
@@ -2074,9 +2075,7 @@ function closeSearch() {
   hideSearchResults();
 }
 
-searchInput.addEventListener("focus", () => {
-  if (!searchInput.value.trim()) runSearch("");
-});
+searchInput.addEventListener("focus", () => runSearch(searchInput.value.trim()));
 searchInput.addEventListener("input", () => {
   const q = searchInput.value.trim();
   searchClear.classList.toggle("hidden", !q);
@@ -2096,6 +2095,7 @@ searchClear.addEventListener("click", () => { closeSearch(); searchInput.focus()
 document.addEventListener("mousedown", (e) => {
   if (!searchBox.contains(e.target)) hideSearchResults();
 }, true);
+window.addEventListener("blur", hideSearchResults);
 
 $("#groups").addEventListener("click", (e) => {
   if (!e.target.closest(".tab")) clearSelection();
