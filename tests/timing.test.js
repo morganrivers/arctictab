@@ -3,11 +3,6 @@ import assert from "node:assert/strict";
 import { CoalescingRunner, SerialQueue } from "../lib/timing.js";
 import { settle } from "./fakebrowser.js";
 
-async function tick(t, ms) {
-  t.mock.timers.tick(ms);
-  await settle();
-}
-
 function deferred() {
   let resolve;
   let reject;
@@ -15,14 +10,25 @@ function deferred() {
   return { promise, resolve, reject };
 }
 
-function recordingRunner(t, delayMs = 600) {
-  t.mock.timers.enable({ apis: ["setTimeout"] });
+function frames() {
+  const queued = [];
+  return {
+    defer: (fn) => queued.push(fn),
+    get count() { return queued.length; },
+    async flush() {
+      for (const fn of queued.splice(0)) fn();
+      await settle();
+    },
+  };
+}
+
+function recordingRunner(defer) {
   const runs = [];
   const errors = [];
   let active = 0;
   let maxActive = 0;
   const runner = new CoalescingRunner({
-    delayMs,
+    defer,
     run: (source) => {
       const d = deferred();
       active++;
@@ -35,99 +41,94 @@ function recordingRunner(t, delayMs = 600) {
   return { runner, runs, errors, maxActive: () => maxActive };
 }
 
-test("a burst of tab events within the delay causes one refresh", async (t) => {
-  const { runner, runs } = recordingRunner(t);
-  for (const source of ["onCreated", "onUpdated", "onMoved", "onUpdated", "onRemoved"]) {
-    runner.schedule(source);
-    await tick(t, 100);
-  }
-  assert.equal(runs.length, 0);
-  await tick(t, 600);
-  assert.deepEqual(runs.map((r) => r.source), ["onRemoved"]);
+test("a tab event starts a refresh at once, with no timer", async () => {
+  const { runner, runs } = recordingRunner(undefined);
+  runner.schedule("onCreated");
+  await settle();
+  assert.deepEqual(runs.map((r) => r.source), ["onCreated"]);
 });
 
-test("events during a refresh cause exactly one follow-up refresh, never a second one in parallel", async (t) => {
-  const { runner, runs, maxActive } = recordingRunner(t);
+test("events in the same moment share one refresh, which sees the latest", async () => {
+  const f = frames();
+  const { runner, runs } = recordingRunner(f.defer);
+  for (const source of ["onUpdated url", "onUpdated title", "onUpdated complete"]) runner.schedule(source);
+  assert.equal(f.count, 1);
+  await f.flush();
+  assert.deepEqual(runs.map((r) => r.source), ["onUpdated complete"]);
+});
+
+test("events during a refresh cause exactly one follow-up refresh, never a second one in parallel", async () => {
+  const { runner, runs, maxActive } = recordingRunner(undefined);
   runner.schedule("onCreated");
-  await tick(t, 600);
-  assert.equal(runs.length, 1);
-  for (const source of ["onUpdated", "onMoved", "onUpdated"]) {
-    runner.schedule(source);
-    await tick(t, 700);
-  }
+  await settle();
+  for (const source of ["onUpdated", "onMoved", "onUpdated"]) { runner.schedule(source); await settle(); }
   assert.equal(runs.length, 1, "nothing starts while the first refresh runs");
   runs[0].finish();
   await settle();
-  await tick(t, 600);
   assert.equal(runs.length, 2);
-  assert.match(runs[1].source, /onUpdated/);
+  assert.equal(runs[1].source, "pending onUpdated");
   runs[1].finish();
   await settle();
-  await tick(t, 5000);
   assert.equal(runs.length, 2, "one follow-up covers every event that arrived");
   assert.equal(maxActive(), 1);
 });
 
-test("a failed refresh is reported and does not block the next one", async (t) => {
-  const { runner, runs, errors } = recordingRunner(t);
+test("a failed refresh is reported and does not block the next one", async () => {
+  const { runner, runs, errors } = recordingRunner(undefined);
   runner.schedule("onCreated");
-  await tick(t, 600);
+  await settle();
   runs[0].fail(new Error("tabs.query failed"));
   await settle();
   assert.deepEqual(errors, [["tabs.query failed", "onCreated"]]);
   runner.schedule("onUpdated");
-  await tick(t, 600);
+  await settle();
   assert.equal(runs.length, 2);
 });
 
-test("a refresh waits while the panel holds still, then runs once", async (t) => {
-  const { runner, runs } = recordingRunner(t);
+test("a refresh waits while the tab menu is open, then runs once", async () => {
+  const { runner, runs } = recordingRunner(undefined);
   runner.hold();
   runner.schedule("onUpdated");
-  await tick(t, 600);
-  runner.schedule("post-close-resync");
-  await tick(t, 600);
+  await settle();
+  runner.schedule("onCreated");
+  await settle();
   assert.equal(runs.length, 0, "no rows move while the menu is open");
   runner.release();
-  await tick(t, 600);
-  assert.equal(runs.length, 1);
-  assert.match(runs[0].source, /post-close-resync/);
+  await settle();
+  assert.deepEqual(runs.map((r) => r.source), ["pending onCreated"]);
 });
 
-test("holds nest, so the refresh waits for the last release", async (t) => {
-  const { runner, runs } = recordingRunner(t);
+test("holds nest, so the refresh waits for the last release", async () => {
+  const { runner, runs } = recordingRunner(undefined);
   runner.hold();
   runner.hold();
   runner.schedule("onUpdated");
-  await tick(t, 600);
   runner.release();
-  await tick(t, 600);
+  await settle();
   assert.equal(runs.length, 0);
   runner.release();
-  await tick(t, 600);
+  await settle();
   assert.equal(runs.length, 1);
 });
 
-test("a hold taken during a refresh keeps the follow-up waiting until release", async (t) => {
-  const { runner, runs } = recordingRunner(t);
+test("a hold taken during a refresh keeps the follow-up waiting until release", async () => {
+  const { runner, runs } = recordingRunner(undefined);
   runner.schedule("onCreated");
-  await tick(t, 600);
+  await settle();
   runner.hold();
   runner.schedule("onUpdated");
-  await tick(t, 600);
   runs[0].finish();
   await settle();
-  await tick(t, 600);
   assert.equal(runs.length, 1);
   runner.release();
-  await tick(t, 600);
+  await settle();
   assert.equal(runs.length, 2);
 });
 
-test("a refresh the user asks for waits for the running one instead of overlapping it", async (t) => {
-  const { runner, runs, maxActive } = recordingRunner(t);
+test("a refresh the user asks for waits for the running one instead of overlapping it", async () => {
+  const { runner, runs, maxActive } = recordingRunner(undefined);
   runner.schedule("onCreated");
-  await tick(t, 600);
+  await settle();
   const order = [];
   const manual = runner.runNow(async () => { order.push("re-organize"); });
   await settle();
@@ -138,81 +139,63 @@ test("a refresh the user asks for waits for the running one instead of overlappi
   assert.equal(maxActive(), 1);
 });
 
-test("an event during a user refresh is refreshed after it", async (t) => {
-  const { runner, runs } = recordingRunner(t);
+test("an event during a user refresh is refreshed after it", async () => {
+  const { runner, runs } = recordingRunner(undefined);
   const gate = deferred();
   const manual = runner.runNow(() => gate.promise);
   runner.schedule("onMoved");
-  await tick(t, 600);
+  await settle();
   assert.equal(runs.length, 0);
   gate.resolve();
   await manual;
-  await tick(t, 600);
+  await settle();
   assert.equal(runs.length, 1);
 });
 
-function closeRegroupPair(t) {
-  t.mock.timers.enable({ apis: ["setTimeout"] });
-  const timeline = [];
+function sliderPair() {
+  const f = frames();
   const passes = [];
   const refresh = new CoalescingRunner({
-    delayMs: 600,
-    run: (source) => { const d = deferred(); timeline.push(`refresh ${source}`); passes.push(d); return d.promise.then(() => timeline.push("refresh done")); },
+    run: () => { const d = deferred(); passes.push(["refresh", d]); return d.promise; },
     onError: (e) => { throw e; },
   });
-  const regroup = new CoalescingRunner({
-    delayMs: 0,
-    run: (source) => refresh.runNow(() => { const d = deferred(); timeline.push(`regroup ${source}`); passes.push(d); return d.promise.then(() => timeline.push("regroup done")); }),
+  const recluster = new CoalescingRunner({
+    defer: f.defer,
+    run: (source) => refresh.runNow(() => { const d = deferred(); passes.push([`recluster ${source}`, d]); return d.promise; }),
     onError: (e) => { throw e; },
   });
-  return { refresh, regroup, timeline, passes };
+  return { f, refresh, recluster, passes };
 }
 
-test("a finished close regroups at once, with no wait", async (t) => {
-  const { regroup, timeline } = closeRegroupPair(t);
-  regroup.schedule("close-button");
-  await tick(t, 0);
-  assert.deepEqual(timeline, ["regroup close-button"]);
+test("dragging a slider regroups at most once per frame", async () => {
+  const { f, recluster, passes } = sliderPair();
+  for (let v = 0; v < 10; v++) recluster.schedule(`slider ${v}`);
+  await f.flush();
+  assert.deepEqual(passes.map((p) => p[0]), ["recluster slider 9"]);
 });
 
-test("closes that finish during a regroup share one more regroup", async (t) => {
-  const { regroup, timeline, passes } = closeRegroupPair(t);
-  regroup.schedule("close 1");
-  await tick(t, 0);
-  for (const n of [2, 3, 4]) { regroup.schedule(`close ${n}`); await tick(t, 0); }
-  passes[0].resolve();
+test("slider moves during a slow regroup share one more regroup on the next frame", async () => {
+  const { f, recluster, passes } = sliderPair();
+  recluster.schedule("slider 1");
+  await f.flush();
+  for (let v = 2; v < 6; v++) { recluster.schedule(`slider ${v}`); await f.flush(); }
+  assert.equal(passes.length, 1);
+  passes[0][1].resolve();
   await settle();
-  await tick(t, 0);
-  assert.deepEqual(timeline, ["regroup close 1", "regroup done", "regroup pending close 4"]);
-  passes[1].resolve();
-  await settle();
-  await tick(t, 1000);
-  assert.equal(passes.length, 2);
+  await f.flush();
+  assert.deepEqual(passes.map((p) => p[0]), ["recluster slider 1", "recluster pending slider 5"]);
 });
 
-test("a close regroup waits for a running refresh instead of drawing over it", async (t) => {
-  const { refresh, regroup, timeline, passes } = closeRegroupPair(t);
+test("a slider regroup waits for a running tab refresh instead of drawing over it", async () => {
+  const { f, refresh, recluster, passes } = sliderPair();
   refresh.schedule("onUpdated");
-  await tick(t, 600);
-  regroup.schedule("close-button");
-  await tick(t, 0);
-  assert.deepEqual(timeline, ["refresh onUpdated"]);
-  passes[0].resolve();
   await settle();
-  assert.deepEqual(timeline, ["refresh onUpdated", "refresh done", "regroup close-button"]);
-});
-
-test("a tab event during a close regroup refreshes after it, not alongside", async (t) => {
-  const { refresh, regroup, timeline, passes } = closeRegroupPair(t);
-  regroup.schedule("close-button");
-  await tick(t, 0);
-  refresh.schedule("onCreated");
-  await tick(t, 600);
-  assert.deepEqual(timeline, ["regroup close-button"]);
-  passes[0].resolve();
+  recluster.schedule("slider 1");
+  await f.flush();
+  assert.deepEqual(passes.map((p) => p[0]), ["refresh"]);
+  passes[0][1].resolve();
   await settle();
-  await tick(t, 600);
-  assert.deepEqual(timeline, ["regroup close-button", "regroup done", "refresh pending onCreated"]);
+  assert.deepEqual(passes.map((p) => p[0]), ["refresh", "recluster slider 1"]);
 });
 
 test("strip jobs run one after another in the order they were queued", async () => {
@@ -232,4 +215,17 @@ test("a failed strip job is reported to its caller and the queue keeps going", a
   const queue = new SerialQueue();
   await assert.rejects(queue.run(async () => { throw new Error("Invalid tab ID: 9"); }), /Invalid tab ID/);
   assert.equal(await queue.run(async () => "next"), "next");
+});
+
+test("the default trigger calls queueMicrotask unbound, as browsers require", async (t) => {
+  const real = globalThis.queueMicrotask;
+  t.after(() => { globalThis.queueMicrotask = real; });
+  globalThis.queueMicrotask = function (fn) {
+    if (this !== undefined && this !== globalThis) throw new TypeError("'queueMicrotask' called on an object that does not implement interface Window.");
+    real(fn);
+  };
+  const { runner, runs } = recordingRunner(undefined);
+  runner.schedule("onCreated");
+  await settle();
+  assert.equal(runs.length, 1);
 });

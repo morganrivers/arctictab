@@ -15,6 +15,7 @@ import { openContextMenu, closeContextMenu } from "../lib/contextmenu.js";
 import { tabMenuModel, runTabMenuAction, menuContext } from "../lib/tabmenu.js";
 import { isOutsideWindow, canMoveToNewWindow, moveTabsToNewWindow } from "../lib/newwindow.js";
 import { CoalescingRunner, SerialQueue } from "../lib/timing.js";
+import { TabStore } from "../lib/tabstore.js";
 import { stripOrder, liveBlock, moveTabsBefore as moveStripTabsBefore, moveTabsToStart as moveStripTabsToStart } from "../lib/stripmoves.js";
 
 initTheme();
@@ -73,7 +74,6 @@ applyBtn.textContent = "Apply groups";
 const rearrangeBtn = $("#rearrange-btn");
 
 let state = null;
-let rerunTimer = null;
 let autoApplying = false;
 let suppressMoveRefresh = 0;
 async function withOwnMoves(fn) {
@@ -372,10 +372,10 @@ function saveSettings() {
   }).catch((e) => console.warn("[arctictab] saveSettings failed", e));
 }
 
-slider.addEventListener("input", () => { updateWindowDisplay(); saveSettings(); scheduleRecluster(); });
-penaltySlider.addEventListener("input", () => { updatePenaltyDisplay(); saveSettings(); scheduleRecluster(); });
-smallPenaltySlider.addEventListener("input", () => { updateSmallPenaltyDisplay(); saveSettings(); scheduleRecluster(); });
-controlChk.addEventListener("change", () => { applyControlVisibility(); saveSettings(); scheduleRecluster(); });
+slider.addEventListener("input", () => { updateWindowDisplay(); saveSettings(); scheduleRecluster("size-slider"); });
+penaltySlider.addEventListener("input", () => { updatePenaltyDisplay(); saveSettings(); scheduleRecluster("penalty-slider"); });
+smallPenaltySlider.addEventListener("input", () => { updateSmallPenaltyDisplay(); saveSettings(); scheduleRecluster("small-penalty-slider"); });
+controlChk.addEventListener("change", () => { applyControlVisibility(); saveSettings(); scheduleRecluster("size-control"); });
 loadSettings().then(() => { updateWindowDisplay(); updatePenaltyDisplay(); updateSmallPenaltyDisplay(); applyControlVisibility(); });
 updateWindowDisplay();
 updatePenaltyDisplay();
@@ -587,14 +587,6 @@ copyStateBtn.addEventListener("click", async () => {
   }
 });
 
-function scheduleRecluster() {
-  if (!state) return;
-  clearTimeout(rerunTimer);
-  rerunTimer = setTimeout(() => {
-    recluster().catch((e) => { console.error(e); status("error: " + (e?.message || e)); });
-  }, 80);
-}
-
 async function recluster({ forceSimilarity = false } = {}) {
   const tRecluster = performance.now();
   console.assert(state != null, "state must exist");
@@ -797,31 +789,65 @@ async function queryTabs() {
 }
 
 let refreshId = 0;
-let lastTabsFingerprint = null;
-let lastTextsFingerprint = null;
 
 function stableTitle(title) {
   return (title || "").replace(/^\(\d+\)\s*/, "").trim();
 }
-function tabsFingerprint(tabs) {
-  return tabs.map((t) => `${t.id}\x1f${t.index}\x1f${t.url || ""}\x1f${stableTitle(t.title)}\x1f${t.pinned ? 1 : 0}`).join("\x1e");
-}
-// Strip position belongs in here as well as in the tabs fingerprint: linear
-// clustering cuts on adjacency, so a tab that only moved still needs a fresh
-// pass even though every tab's text is byte-identical.
-function textsFingerprintFor(tabs, texts) {
-  return tabs.map((t, i) => `${t.id}\x1f${t.index}\x1f${texts[i] || ""}`).join("\x1e");
-}
+
+// A tab is read again only when what its text is built from changes. A loading
+// page is read from its title and address alone, since reading its content
+// would wait for the load, and is read in full once it finishes.
+const tabStore = new TabStore({
+  keyOf: (t) => `${t.url || ""}\x1f${stableTitle(t.title)}\x1f${t.status === "loading" ? "loading" : "ready"}`,
+});
+
 function resetRefreshFingerprints() {
-  lastTabsFingerprint = null;
-  lastTextsFingerprint = null;
+  tabStore.forgetLayout();
+}
+
+async function readTabTexts(tabs, { silent }) {
+  const readable = (t) => t.status !== "loading";
+  const metas = await collectMetas(tabs, (t) => (readable(t) ? extractMeta(t) : null), {
+    onSettled: (done, total) => {
+      if (!silent) setPhase("meta", done / total, `Reading ${done}/${total} tabs`);
+    },
+  });
+  return tabs.map((t, i) => buildText(t, metas[i]));
+}
+
+async function embedTabTexts(tabs, texts, { silent, modelReady, id }) {
+  const cached = await getMany(tabs.map((t) => t.url));
+  const embeddings = cached.map((c, i) => (c && c.text === texts[i] ? c.embedding : null));
+  const missing = embeddings.flatMap((e, i) => (e ? [] : [i]));
+  log(`refresh #${id} cache: ${tabs.length - missing.length} hits, ${missing.length} misses`);
+  if (!missing.length) return embeddings;
+  await modelReady;
+  if (!silent) setPhase("model", 1, "Model ready");
+  const batchSize = 16;
+  const tEmb = performance.now();
+  for (let i = 0; i < missing.length; i += batchSize) {
+    const batch = missing.slice(i, i + batchSize);
+    const embs = await embedBatch(batch.map((k) => texts[k]));
+    for (let j = 0; j < embs.length; j++) {
+      const k = batch[j];
+      embeddings[k] = embs[j];
+      await put(tabs[k].url, embs[j], texts[k]);
+    }
+    const done = Math.min(i + batchSize, missing.length);
+    if (!silent) {
+      status(`embedded ${done}/${missing.length}`);
+      setPhase("embed", done / missing.length, `Embedding ${done}/${missing.length} tabs`);
+    }
+  }
+  log(`refresh #${id} embedding done in ${(performance.now() - tEmb).toFixed(0)}ms`);
+  await browser.runtime.sendMessage({ type: "invalidateSearchIndex" });
+  return embeddings;
 }
 
 async function refresh({ silent = false, reclusterOpts = {}, force = false } = {}) {
   const id = ++refreshId;
   log(`refresh #${id} start (silent=${silent}, force=${force})`);
   const t0 = performance.now();
-  const modelReady = getExtractor();
   if (!silent) {
     resetProgress();
     status("collecting tabs...");
@@ -829,104 +855,49 @@ async function refresh({ silent = false, reclusterOpts = {}, force = false } = {
     setPhase("tabs", 0, "Collecting tabs");
   }
   const tabs = await queryTabs();
-  log(`refresh #${id} tabs:`, tabs.length);
   if (tabs.length === 0) {
     status("no tabs found in this window");
     hideBusy();
     $("#groups").innerHTML = '<div class="placeholder">No tabs found.</div>';
     return;
   }
-
-  const tabsFp = tabsFingerprint(tabs);
-  if (!force && tabsFp === lastTabsFingerprint && state?.lastGroups) {
-    log(`refresh #${id} skipped: tabs fingerprint unchanged`);
-    return;
-  }
-
-  if (!silent) { status(`scraping metadata for ${tabs.length} tabs...`); setPhase("tabs", 1, `Reading ${tabs.length} tabs`); }
-  const tMeta = performance.now();
-  const metas = await collectMetas(tabs, extractMeta, {
-    onSettled: (done, total) => {
-      if (!silent) setPhase("meta", done / total, `Reading ${done}/${total} tabs`);
-    },
+  const stale = tabStore.staleTabs(tabs);
+  if (!silent) { status(`reading ${stale.length} tabs...`); setPhase("tabs", 1, `Reading ${stale.length} tabs`); }
+  const modelReady = stale.length ? getExtractor() : null;
+  const { texts, embeddings, changed, read } = await tabStore.sync(tabs, {
+    readTexts: (list) => readTabTexts(list, { silent }),
+    embedTexts: (list, listTexts) => embedTabTexts(list, listTexts, { silent, modelReady, id }),
   });
-  const texts = tabs.map((t, i) => buildText(t, metas[i]));
-  log(`refresh #${id} metas done in ${(performance.now() - tMeta).toFixed(0)}ms, ${metas.filter(Boolean).length}/${tabs.length} had meta`);
-
-  const textsFp = textsFingerprintFor(tabs, texts);
-  if (!force && textsFp === lastTextsFingerprint && state?.lastGroups) {
-    log(`refresh #${id} skipped: texts fingerprint unchanged`);
+  log(`refresh #${id}: read ${read.length} of ${tabs.length} tabs [${read.join(",")}] in ${(performance.now() - t0).toFixed(0)}ms`);
+  if (!force && !changed && state?.lastGroups) {
+    log(`refresh #${id} skipped: no tab changed`);
+    hideBusy();
     return;
   }
-
-  const cached = await getMany(tabs.map((t) => t.url));
-  const embeddings = new Array(tabs.length);
-  const toEmbedIdx = [];
-  const toEmbedTexts = [];
-  for (let i = 0; i < tabs.length; i++) {
-    if (cached[i] && cached[i].text === texts[i]) {
-      embeddings[i] = cached[i].embedding;
-    } else {
-      toEmbedIdx.push(i);
-      toEmbedTexts.push(texts[i]);
-    }
-  }
-  log(`refresh #${id} cache: ${tabs.length - toEmbedIdx.length} hits, ${toEmbedIdx.length} misses`);
-
-  if (toEmbedTexts.length) {
-    await modelReady;
-    log(`refresh #${id} model ready in ${(performance.now() - t0).toFixed(0)}ms`);
-    if (!silent) setPhase("model", 1, "Model ready");
-    if (!silent) setPhase("embed", 0, `Embedding 0/${toEmbedTexts.length} tabs`);
-    if (!silent) status(`embedding ${toEmbedTexts.length} tabs...`);
-    const batchSize = 16;
-    const tEmb = performance.now();
-    for (let i = 0; i < toEmbedTexts.length; i += batchSize) {
-      const batch = toEmbedTexts.slice(i, i + batchSize);
-      const embs = await embedBatch(batch);
-      for (let j = 0; j < embs.length; j++) {
-        const idx = toEmbedIdx[i + j];
-        embeddings[idx] = embs[j];
-        await put(tabs[idx].url, embs[j], texts[idx]);
-      }
-      const done = Math.min(i + batchSize, toEmbedTexts.length);
-      if (!silent) {
-        status(`embedded ${done}/${toEmbedTexts.length}`);
-        setPhase("embed", done / toEmbedTexts.length, `Embedding ${done}/${toEmbedTexts.length} tabs`);
-      }
-    }
-    log(`refresh #${id} embedding done in ${(performance.now() - tEmb).toFixed(0)}ms`);
-    await browser.runtime.sendMessage({ type: "invalidateSearchIndex" });
-  }
-
-  const missing = embeddings.findIndex((e) => !e);
-  if (missing !== -1) {
-    log(`refresh #${id} ERROR: missing embedding at index ${missing}, tab:`, tabs[missing]);
-    status(`error: missing embedding at idx ${missing}`);
-    return;
-  }
-
   if (!silent) setPhase("model", 1, "Grouping tabs");
   if (!silent) setPhase("embed", 1, "Grouping tabs");
-  // Only a pass that reaches clustering may record its fingerprints. Recording
-  // them earlier lets a pass that bailed out claim it handled this tab set, so
-  // the next identical refresh short-circuits and the panel stays stale.
-  lastTabsFingerprint = tabsFp;
-  lastTextsFingerprint = textsFp;
   state = { tabs, embeddings, texts, lastGroups: null };
-  log(`refresh #${id} state set, calling recluster`);
   await recluster(reclusterOpts);
   log(`refresh #${id} done`);
 }
 
 const refreshRunner = new CoalescingRunner({
-  delayMs: 600,
   run: (source) => { log("refresh run from", source); return refresh({ silent: true }); },
   onError: (e, source) => { console.error("[arctictab] refresh error:", e); log(`refresh from ${source} failed: ${e?.message || e}`); status("refresh error: " + (e?.message || e)); },
   log: (msg) => log(`refreshRunner: ${msg}`),
 });
 function scheduleRefresh(source) {
   refreshRunner.schedule(source);
+}
+
+const reclusterRunner = new CoalescingRunner({
+  defer: (fn) => requestAnimationFrame(fn),
+  run: (source) => refreshRunner.runNow(() => { log(`recluster from ${source}`); return state ? recluster() : undefined; }),
+  onError: (e, source) => { console.error(e); log(`recluster from ${source} failed: ${e?.message || e}`); status("error: " + (e?.message || e)); },
+  log: (msg) => log(`reclusterRunner: ${msg}`),
+});
+function scheduleRecluster(source) {
+  reclusterRunner.schedule(source);
 }
 
 let sidebarWindowId = null;
@@ -1078,7 +1049,7 @@ async function togglePinTab(tabId, containingGroup) {
     status("tab pinned.");
   }
   if (state?.lastGroups) renderGroups(state.lastGroups);
-  scheduleRecluster();
+  scheduleRecluster("pin-tab");
 }
 
 function toggleGroupPin(clusterTabs, pinId) {
@@ -1093,7 +1064,7 @@ function toggleGroupPin(clusterTabs, pinId) {
     status(`group pinned: "${name}".`);
   }
   if (state?.lastGroups) renderGroups(state.lastGroups);
-  scheduleRecluster();
+  scheduleRecluster("pin-group");
 }
 
 const TAB_DRAG_TYPE = "application/x-arctictab-tab-ids";
@@ -1880,8 +1851,8 @@ async function bookmarkGroup(label, groupTabs) {
   }
 }
 
-// Tabs this panel closed itself. Their onRemoved needs no full refresh: the
-// state splice below already describes the new tab set, so only a regroup runs.
+// Tabs this panel closed itself. closeTabs schedules their refresh once the
+// removal finishes, so their onRemoved does not add another.
 const selfClosedIds = new Set();
 
 // Close-latency probes. They split the wait into the part this panel controls
@@ -1889,17 +1860,6 @@ const selfClosedIds = new Set();
 // actually going away), so a slow close can be blamed on the right side.
 let closePressedAt = null;
 const closeRequestedAt = new Map();
-
-// Firefox drops a closed tab out of its native group on its own, but the group
-// boundaries the clusters imply can still shift. Each finished close regroups
-// from the spliced state; closes that finish while one regroup runs share the
-// next one, so a quick run of closes costs two passes instead of one each.
-const closeRegroup = new CoalescingRunner({
-  delayMs: 0,
-  run: (source) => refreshRunner.runNow(() => { log(`close regroup after ${source}`); return recluster(); }),
-  onError: (e, source) => { console.error(e); log(`close regroup after ${source} failed: ${e?.message || e}`); status("regroup error: " + (e?.message || e)); },
-  log: (msg) => log(`closeRegroup: ${msg}`),
-});
 
 function dropRowsFromPanel(ids) {
   for (const id of ids) {
@@ -1929,15 +1889,7 @@ async function closeTabs(ids, { label } = {}) {
     status(`closing ${ids.length} tab(s)...`);
     await removal;
     log(`closeTabs: ${ids.length} tabs removed in ${(performance.now() - tRemove).toFixed(0)}ms`);
-    if (state) {
-      const remove = new Set(ids);
-      const keep = (arr) => arr.filter((_, i) => !remove.has(state.tabs[i].id));
-      const newTabs = state.tabs.filter((t) => !remove.has(t.id));
-      const newEmbeddings = keep(state.embeddings);
-      const newTexts = keep(state.texts);
-      state = { tabs: newTabs, embeddings: newEmbeddings, texts: newTexts, lastGroups: null };
-      closeRegroup.schedule(label || "close");
-    }
+    scheduleRefresh(label || "close");
   } catch (e) {
     for (const id of ids) { selfClosedIds.delete(id); closeRequestedAt.delete(id); }
     console.error(e);
