@@ -208,6 +208,14 @@
         <p class="hint">A composed keyword must appear in at least this fraction of the group's tabs.</p>
       </section>
       <section>
+        <h2>Memory</h2>
+        <label>
+          <input type="checkbox" id="unloadModelWhenIdle" />
+          <span>Free the model's memory after <span id="modelIdleMinutes"></span> minutes unused</span>
+        </label>
+        <p class="hint">Frees about 170 MB. The next grouping or search then waits about 0.3 seconds while the model loads again.</p>
+      </section>
+      <section>
         <h2>Diagnostics</h2>
         <label>
           <input type="checkbox" id="debugLogging" />

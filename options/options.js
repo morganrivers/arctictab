@@ -1,5 +1,5 @@
 import { initTheme } from "../lib/theme.js";
-import { OPTIONS_KEY, OPTIONS_DEFAULTS as DEFAULTS } from "../lib/options.js";
+import { OPTIONS_KEY, OPTIONS_DEFAULTS as DEFAULTS, MODEL_IDLE_UNLOAD_MINUTES } from "../lib/options.js";
 
 initTheme();
 
@@ -33,6 +33,8 @@ const hideTabTitle = $("#hideTabTitle");
 const hideTabHost = $("#hideTabHost");
 const hideControlGroupSize = $("#hideControlGroupSize");
 const debugLogging = $("#debugLogging");
+const unloadModelWhenIdle = $("#unloadModelWhenIdle");
+$("#modelIdleMinutes").textContent = String(MODEL_IDLE_UNLOAD_MINUTES);
 const autoPinTabHint = $("#autoPinTabHint");
 const autoPinGroupHint = $("#autoPinGroupHint");
 const status = $("#status");
@@ -160,6 +162,7 @@ async function load() {
   hideTabHost.checked = !!v.hideTabHost;
   hideControlGroupSize.checked = !!v.hideControlGroupSize;
   debugLogging.checked = !!v.debugLogging;
+  unloadModelWhenIdle.checked = !!v.unloadModelWhenIdle;
   nameStyle.value = v.nameStyle;
   for (const k of SLIDERS) { sliders[k].value = String(v[k]); showSlider(k); }
   groupingRules = (v.groupingRules || []).map((r) => ({ field: r.field === "title" ? "title" : "domain", pattern: r.pattern || "", name: r.name || "" }));
@@ -191,6 +194,7 @@ async function save() {
       hideTabHost: hideTabHost.checked,
       hideControlGroupSize: hideControlGroupSize.checked,
       debugLogging: debugLogging.checked,
+      unloadModelWhenIdle: unloadModelWhenIdle.checked,
       nameStyle: nameStyle.value,
       headSim: +sliders.headSim.value,
       curatedSim: +sliders.curatedSim.value,
@@ -228,6 +232,7 @@ hideTabTitle.addEventListener("change", save);
 hideTabHost.addEventListener("change", save);
 hideControlGroupSize.addEventListener("change", save);
 debugLogging.addEventListener("change", save);
+unloadModelWhenIdle.addEventListener("change", save);
 nameStyle.addEventListener("change", save);
 for (const k of SLIDERS) {
   sliders[k].addEventListener("input", () => showSlider(k));

@@ -1,12 +1,16 @@
-arctictab bundles the following third-party components, unmodified.
+arctictab bundles the following third-party components. Their source is
+unmodified; Transformers.js and ONNX Runtime Web are bundled together by
+scripts/build_transformers.mjs.
 
 @huggingface/transformers 3.0.2
-  Files: vendor/transformers/transformers.js
+  Files: vendor/transformers/transformers.js (bundled from the package's src/)
   License: Apache License 2.0 (see vendor/transformers/LICENSE)
   Source: https://github.com/huggingface/transformers.js/releases/tag/3.0.2
 
-ONNX Runtime Web (redistributed inside @huggingface/transformers 3.0.2)
-  Files: vendor/transformers/wasm/ort-wasm-simd-threaded.jsep.wasm
+ONNX Runtime Web 1.21.0-dev.20241024-d9ca84ef96 (CPU-only build, onnxruntime-web/wasm)
+  Files: vendor/transformers/transformers.js (bundled),
+         vendor/transformers/wasm/ort-wasm-simd-threaded.mjs,
+         vendor/transformers/wasm/ort-wasm-simd-threaded.wasm
   License: MIT
   Source: https://github.com/microsoft/onnxruntime
 

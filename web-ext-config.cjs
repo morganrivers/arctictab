@@ -9,6 +9,8 @@ module.exports = {
     "tests/**",
     "*.md",
     "setup.sh",
+    "scripts",
+    "scripts/**",
     "viewer.py",
     "package.json",
     "package-lock.json",
