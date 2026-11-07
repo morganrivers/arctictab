@@ -10,6 +10,7 @@ import { TRANSPARENT_PX, faviconUrlFor } from "../lib/favicon.js";
 import { debugLog, isDebugEnabled, onDebugChange } from "../lib/log.js";
 import { createDevLogger, captureGlobalErrors } from "../lib/devlog.js";
 import { OPTIONS_KEY, OPTIONS_DEFAULTS } from "../lib/options.js";
+import { freezeOtherTabs } from "../lib/freeze.js";
 import { collectMetas } from "../lib/meta.js";
 import { openContextMenu, closeContextMenu } from "../lib/contextmenu.js";
 import { tabMenuModel, runTabMenuAction, menuContext } from "../lib/tabmenu.js";
@@ -268,6 +269,7 @@ function applyButtonVisibility() {
   if (logsBtnEl) logsBtnEl.classList.toggle("hidden", !isDebugEnabled());
   const copyStateBtnEl = document.getElementById("copy-state-btn");
   if (copyStateBtnEl) copyStateBtnEl.classList.toggle("hidden", !options.showCopyState);
+  freezeBtn.classList.toggle("hidden", !options.showFreezeButton);
   if (options.hideStatus) {
     statusEl = statusEl || document.getElementById("status-line");
     if (statusEl) statusEl.classList.add("hidden");
@@ -542,6 +544,20 @@ logsBtn.addEventListener("click", async () => {
     status("log copy error: " + (e?.message || e));
   } finally {
     logsBtn.disabled = false;
+  }
+});
+
+const freezeBtn = $("#freeze-btn");
+freezeBtn.addEventListener("click", async () => {
+  freezeBtn.disabled = true;
+  try {
+    const n = await freezeOtherTabs();
+    status(`froze ${n} tab${n === 1 ? "" : "s"}.`);
+  } catch (e) {
+    console.error(e);
+    status("freeze error: " + (e?.message || e));
+  } finally {
+    freezeBtn.disabled = false;
   }
 });
 

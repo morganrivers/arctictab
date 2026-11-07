@@ -1,5 +1,5 @@
 import { initTheme } from "../lib/theme.js";
-import { OPTIONS_KEY, OPTIONS_DEFAULTS as DEFAULTS, MODEL_IDLE_UNLOAD_MINUTES } from "../lib/options.js";
+import { OPTIONS_KEY, OPTIONS_DEFAULTS as DEFAULTS, MODEL_IDLE_UNLOAD_MINUTES, FREEZE_IDLE_MINUTES } from "../lib/options.js";
 
 initTheme();
 
@@ -34,6 +34,9 @@ const hideTabHost = $("#hideTabHost");
 const hideControlGroupSize = $("#hideControlGroupSize");
 const debugLogging = $("#debugLogging");
 const unloadModelWhenIdle = $("#unloadModelWhenIdle");
+const freezeIdleTabs = $("#freezeIdleTabs");
+const showFreezeButton = $("#showFreezeButton");
+$("#freezeIdleMinutes").textContent = String(FREEZE_IDLE_MINUTES);
 $("#modelIdleMinutes").textContent = String(MODEL_IDLE_UNLOAD_MINUTES);
 const autoPinTabHint = $("#autoPinTabHint");
 const autoPinGroupHint = $("#autoPinGroupHint");
@@ -163,6 +166,8 @@ async function load() {
   hideControlGroupSize.checked = !!v.hideControlGroupSize;
   debugLogging.checked = !!v.debugLogging;
   unloadModelWhenIdle.checked = !!v.unloadModelWhenIdle;
+  freezeIdleTabs.checked = !!v.freezeIdleTabs;
+  showFreezeButton.checked = !!v.showFreezeButton;
   nameStyle.value = v.nameStyle;
   for (const k of SLIDERS) { sliders[k].value = String(v[k]); showSlider(k); }
   groupingRules = (v.groupingRules || []).map((r) => ({ field: r.field === "title" ? "title" : "domain", pattern: r.pattern || "", name: r.name || "" }));
@@ -195,6 +200,8 @@ async function save() {
       hideControlGroupSize: hideControlGroupSize.checked,
       debugLogging: debugLogging.checked,
       unloadModelWhenIdle: unloadModelWhenIdle.checked,
+      freezeIdleTabs: freezeIdleTabs.checked,
+      showFreezeButton: showFreezeButton.checked,
       nameStyle: nameStyle.value,
       headSim: +sliders.headSim.value,
       curatedSim: +sliders.curatedSim.value,
@@ -233,6 +240,8 @@ hideTabHost.addEventListener("change", save);
 hideControlGroupSize.addEventListener("change", save);
 debugLogging.addEventListener("change", save);
 unloadModelWhenIdle.addEventListener("change", save);
+freezeIdleTabs.addEventListener("change", save);
+showFreezeButton.addEventListener("change", save);
 nameStyle.addEventListener("change", save);
 for (const k of SLIDERS) {
   sliders[k].addEventListener("input", () => showSlider(k));

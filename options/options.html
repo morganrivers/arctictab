@@ -214,6 +214,15 @@
           <span>Free the model's memory after <span id="modelIdleMinutes"></span> minutes unused</span>
         </label>
         <p class="hint">Frees about 170 MB. The next grouping or search then waits about 0.3 seconds while the model loads again.</p>
+        <label>
+          <input type="checkbox" id="freezeIdleTabs" />
+          <span>Freeze tabs unused for <span id="freezeIdleMinutes"></span> minutes</span>
+        </label>
+        <label>
+          <input type="checkbox" id="showFreezeButton" />
+          <span>Show a button in the sidebar that freezes all other tabs</span>
+        </label>
+        <p class="hint">A frozen tab stays in the tab bar but its page is closed, which frees its memory, often 50 to 150 MB. It reloads when you open it. Selected tabs and tabs playing sound are never frozen; pinned tabs only by the button.</p>
       </section>
       <section>
         <h2>Diagnostics</h2>

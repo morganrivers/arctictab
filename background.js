@@ -1,5 +1,28 @@
 import { debugLog } from "./lib/log.js";
 import { searchTabs, invalidateIndex } from "./lib/searchindex.js";
+import { watchOption } from "./lib/options.js";
+import { freezeIdleTabs } from "./lib/freeze.js";
+
+// An alarm, not a timer: it also wakes this page after Firefox suspends it.
+const FREEZE_ALARM = "freeze-idle-tabs";
+const FREEZE_CHECK_MINUTES = 5;
+
+browser.alarms.onAlarm.addListener((alarm) => {
+  if (alarm.name !== FREEZE_ALARM) return;
+  freezeIdleTabs().catch((e) => console.error("[arctictab][bg] freezing idle tabs failed", e));
+});
+
+watchOption("freezeIdleTabs", async (on) => {
+  debugLog("[arctictab][bg] freeze idle tabs =", !!on);
+  if (!on) {
+    await browser.alarms.clear(FREEZE_ALARM);
+    return;
+  }
+  // Recreating an existing alarm would push its next run back each time this page wakes.
+  if (!(await browser.alarms.get(FREEZE_ALARM))) {
+    await browser.alarms.create(FREEZE_ALARM, { delayInMinutes: 0.1, periodInMinutes: FREEZE_CHECK_MINUTES });
+  }
+}).catch((e) => console.error("[arctictab][bg] cannot read freezeIdleTabs; idle tabs are not frozen", e));
 
 async function closeActiveGroup() {
   const win = await browser.windows.getLastFocused({ populate: true });
